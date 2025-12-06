@@ -76,22 +76,43 @@ st.markdown(
             color: #334155;
         }
         
-        /* MOBILE SIDEBAR FIX */
+        /* MOBILE IMPROVEMENTS */
         @media (max-width: 768px) {
+            /* Make sidebar narrower on mobile */
             section[data-testid="stSidebar"] {
-                width: 100% !important;
-                min-width: 100% !important;
+                width: 200px !important;
+                min-width: 200px !important;
             }
             section[data-testid="stSidebar"] > div {
-                padding: 1rem 0.5rem !important;
+                padding: 0.5rem !important;
             }
-            .stRadio > div {
-                flex-direction: column !important;
-            }
-            .stRadio label {
-                font-size: 1rem !important;
-                padding: 0.75rem 0.5rem !important;
-            }
+        }
+        
+        /* Better radio button styling */
+        .stRadio > div {
+            gap: 0.25rem !important;
+        }
+        .stRadio > div > label {
+            background: #F1F5F9 !important;
+            padding: 0.75rem 1rem !important;
+            border-radius: 8px !important;
+            margin: 2px 0 !important;
+            cursor: pointer !important;
+            transition: all 0.2s !important;
+            border: 2px solid transparent !important;
+        }
+        .stRadio > div > label:hover {
+            background: #E2E8F0 !important;
+        }
+        .stRadio > div > label[data-checked="true"],
+        .stRadio > div > label:has(input:checked) {
+            background: #2563EB !important;
+            color: white !important;
+            border-color: #1D4ED8 !important;
+        }
+        /* Hide default radio circles */
+        .stRadio > div > label > div:first-child {
+            display: none !important;
         }
     </style>
 """,
@@ -574,18 +595,19 @@ class ScannerEngine:
 def main():
     # --- SIDEBAR ---
     with st.sidebar:
-        st.markdown("## 🛠️ Marta Tools")
-        st.caption("v1.0")
-        st.markdown("---")
-
-        mode = st.radio("", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter"], label_visibility="collapsed")
-        st.markdown("---")
+        st.markdown("### 🛠️ Marta Tools")
+        
+        mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter"], label_visibility="collapsed")
 
         if mode == "🎯 Sniper":
+            st.markdown("---")
             ticker = st.text_input("TICKER", value="TSLA").upper()
             rf = st.number_input("RISK FREE (%)", value=4.5)
             cap = st.number_input("CAPITAL ($)", value=100000)
             kelly = st.slider("KELLY FACTOR", 0.1, 1.0, 0.5)
+        
+        st.markdown("---")
+        st.caption("Tap ✕ or swipe to close")
 
     # --- SHARED INIT (only for Sniper mode now) ---
     if mode == "🎯 Sniper":
@@ -616,12 +638,13 @@ def main():
         def fetch_indices():
             indices = {
                 "SPY": "S&P 500",
-                "QQQ": "NASDAQ 100",
+                "QQQ": "NASDAQ 100", 
                 "DIA": "DOW 30",
                 "IWM": "Russell 2000",
                 "^VIX": "VIX (Fear)"
             }
             data = {}
+            last_date = None
             for sym, name in indices.items():
                 try:
                     df = yf.download(sym, period="5d", progress=False)
@@ -632,9 +655,11 @@ def main():
                         prev = float(df["Close"].iloc[-2]) if len(df) > 1 else current
                         change = ((current - prev) / prev) * 100
                         data[name] = {"price": current, "change": change, "symbol": sym}
+                        if last_date is None:
+                            last_date = df.index[-1]
                 except:
                     pass
-            return data
+            return data, last_date
 
         @st.cache_data(ttl=300, show_spinner=False)
         def fetch_news():
@@ -754,21 +779,34 @@ def main():
             
             return news_items[:10]
 
+        # Refresh button
+        col_refresh, col_date = st.columns([1, 4])
+        with col_refresh:
+            if st.button("🔄 Refresh", help="Clear cache and reload data"):
+                st.cache_data.clear()
+                st.rerun()
+        
         with st.spinner("Loading market data..."):
-            indices_data = fetch_indices()
+            indices_data, data_date = fetch_indices()
             news_data = fetch_news()
+        
+        # Show data freshness
+        with col_date:
+            if data_date:
+                date_str = data_date.strftime('%b %d, %Y') if hasattr(data_date, 'strftime') else str(data_date)
+                st.caption(f"📅 Data as of: {date_str}")
 
         # --- INDICES TICKER BAR ---
         if indices_data:
             cols = st.columns(len(indices_data))
             for i, (name, data) in enumerate(indices_data.items()):
                 with cols[i]:
-                    delta_color = "normal" if data["change"] >= 0 else "inverse"
                     if "VIX" in name:
-                        delta_color = "inverse" if data["change"] >= 0 else "normal"
-                        st.metric(name, f"{data['price']:.2f}", f"{data['change']:+.2f}%", delta_color=delta_color)
+                        # VIX: up is bad (red), down is good (green) - inverse logic
+                        st.metric(name, f"{data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="inverse")
                     else:
-                        st.metric(name, f"${data['price']:.2f}", f"{data['change']:+.2f}%", delta_color=delta_color)
+                        # Normal indices: up is good (green), down is bad (red)
+                        st.metric(name, f"${data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="normal")
         else:
             st.warning("Unable to load indices data")
 
