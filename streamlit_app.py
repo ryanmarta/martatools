@@ -1055,10 +1055,7 @@ def main():
                 consensus = (bs * 0.4) + (hes * 0.3) + (mc * 0.3)
                 edge = consensus - mkt_p
 
-                win = abs(greeks.delta)
-                k_alloc = max(0, (win * 2 - (1 - win)) / 2) * kelly if edge > 0 else 0
-
-                # Probability of Profit (break-even based, risk-neutral)
+                # Probability of Profit (break-even based, risk-neutral) - calculate first for Kelly
                 breakeven = sel_strike + mkt_p if sel_type == "CALL" else sel_strike - mkt_p
                 drift = (rf / 100 - 0.5 * sigma**2) * T
                 denom = sigma * np.sqrt(T)
@@ -1069,7 +1066,24 @@ def main():
                         pop = stats.norm.cdf((np.log(breakeven / spot) - drift) / denom)
                     pop = float(np.clip(pop, 0, 1))
                 else:
-                    pop = np.nan
+                    pop = 0.5  # Default to 50% if can't calculate
+
+                # Kelly Criterion Position Sizing
+                # Formula: Kelly% = (edge / premium) * adjustment * user_factor
+                # Only allocate if we have positive edge
+                if edge > 0 and mkt_p > 0:
+                    # Method 1: Edge-based Kelly (edge relative to cost)
+                    edge_ratio = edge / mkt_p
+                    
+                    # Method 2: PoP-based Kelly (2*p - 1 for fair odds)
+                    pop_kelly = max(0, 2 * pop - 1) if not np.isnan(pop) else 0
+                    
+                    # Blend both methods and apply user's kelly factor
+                    raw_kelly = (edge_ratio * 0.5 + pop_kelly * 0.5)
+                    k_alloc = min(raw_kelly * kelly, 0.25)  # Cap at 25% max position
+                    k_alloc = max(k_alloc, 0)
+                else:
+                    k_alloc = 0
 
                 # Scenario outcomes (±10% and spot)
                 scenarios = [0.9 * spot, spot, 1.1 * spot]
