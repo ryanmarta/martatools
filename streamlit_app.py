@@ -75,6 +75,24 @@ st.markdown(
             margin-top: 30px;
             color: #334155;
         }
+        
+        /* MOBILE SIDEBAR FIX */
+        @media (max-width: 768px) {
+            section[data-testid="stSidebar"] {
+                width: 100% !important;
+                min-width: 100% !important;
+            }
+            section[data-testid="stSidebar"] > div {
+                padding: 1rem 0.5rem !important;
+            }
+            .stRadio > div {
+                flex-direction: column !important;
+            }
+            .stRadio label {
+                font-size: 1rem !important;
+                padding: 0.75rem 0.5rem !important;
+            }
+        }
     </style>
 """,
     unsafe_allow_html=True,
@@ -556,20 +574,21 @@ class ScannerEngine:
 def main():
     # --- SIDEBAR ---
     with st.sidebar:
-        st.title("Marta Tools 🛠️")
-        st.caption("v1.0 | Quantitative Trading Suite")
-
-        mode = st.radio("MODULE", ["📺 DASHBOARD", "💎 OPTIONIZER", "🎯 SNIPER", "🦅 THE HUNTER"])
+        st.markdown("## 🛠️ Marta Tools")
+        st.caption("v1.0")
         st.markdown("---")
 
-        if mode == "🎯 SNIPER":
+        mode = st.radio("", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter"], label_visibility="collapsed")
+        st.markdown("---")
+
+        if mode == "🎯 Sniper":
             ticker = st.text_input("TICKER", value="TSLA").upper()
             rf = st.number_input("RISK FREE (%)", value=4.5)
             cap = st.number_input("CAPITAL ($)", value=100000)
             kelly = st.slider("KELLY FACTOR", 0.1, 1.0, 0.5)
 
     # --- SHARED INIT (only for Sniper mode now) ---
-    if mode == "🎯 SNIPER":
+    if mode == "🎯 Sniper":
         hydra = HydraEngine()
         with st.spinner(f"Connecting to {ticker}..."):
             spot, src = hydra.get_spot(ticker)
@@ -588,7 +607,7 @@ def main():
     # ==========================================
     # MODULE A: DASHBOARD (Market Command Center)
     # ==========================================
-    if mode == "📺 DASHBOARD":
+    if mode == "📺 Dashboard":
         st.title("📺 Market Command Center")
         st.caption("Live indices, market sentiment, and breaking news")
 
@@ -912,7 +931,7 @@ def main():
     # ==========================================
     # MODULE B: OPTIONIZER
     # ==========================================
-    elif mode == "💎 OPTIONIZER":
+    elif mode == "💎 Options":
         st.title("💎 Optionizer")
         st.caption("Options pricing engine with Greeks, edge detection, and backtesting")
 
@@ -1282,7 +1301,7 @@ def main():
     # ==========================================
     # MODULE C: SNIPER (Single Stock Deep Dive)
     # ==========================================
-    elif mode == "🎯 SNIPER":
+    elif mode == "🎯 Sniper":
         st.title("🎯 Sniper: Single Stock Analysis")
         st.caption("Volatility Squeeze + Volume Velocity + Relative Strength + Monte Carlo")
 
@@ -1534,7 +1553,7 @@ def main():
     # ==========================================
     # MODULE D: THE HUNTER (Wide Net Scanner: Ryan Model)
     # ==========================================
-    elif mode == "🦅 THE HUNTER":
+    elif mode == "🦅 Hunter":
         st.title("🦅 The Hunter: Market Scanner")
         st.caption("Cast the net wide | Ryan Model + Trap Detection + Momentum Scoring")
 
