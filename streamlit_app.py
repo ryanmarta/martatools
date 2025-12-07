@@ -598,7 +598,7 @@ def main():
     with st.sidebar:
         st.markdown("### 🛠️ Marta Tools")
         
-        mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter"], label_visibility="collapsed")
+        mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter", "🔍 Opt Hunt", "📊 ETF Hunt", "📊 ETF Opts"], label_visibility="collapsed")
 
         if mode == "🎯 Sniper":
             st.markdown("---")
@@ -1583,7 +1583,8 @@ def main():
                     "Bull Call Spread", "Bear Put Spread",
                     "Bull Put Spread (Credit)", "Bear Call Spread (Credit)",
                     "Long Straddle", "Long Strangle",
-                    "Iron Condor", "Iron Butterfly"
+                    "Iron Condor", "Iron Butterfly",
+                    "Calendar Spread", "Diagonal Spread"
                 ])
             
             with str_col2:
@@ -1874,6 +1875,17 @@ def main():
                         elif strategy_type in ["Iron Butterfly"]:
                             thesis = "Pin risk thesis with max profit at ATM strike"
                             category = "Volatility (Short)"
+                        elif strategy_type in ["Calendar Spread"]:
+                            thesis = "Term-structure play exploiting front/back IV differential"
+                            category = "Volatility"
+                        elif strategy_type in ["Diagonal Spread"]:
+                            if direction in ["Bullish"]:
+                                thesis = "Bullish bias with volatility leverage via time-structure convexity"
+                            elif direction in ["Bearish"]:
+                                thesis = "Bearish bias with volatility leverage via time-structure convexity"
+                            else:
+                                thesis = "Directional + volatility play with term structure mismatch"
+                            category = "Hybrid"
                         else:
                             thesis = "Defined risk structure"
                             category = "Hybrid"
@@ -1917,6 +1929,98 @@ def main():
                             return f"🎯 {category.upper()}", thesis
                         else:
                             return f"✅ {category.upper()}", thesis
+                    
+                    # ==============================================================
+                    # TRADER-MODE GENERATION GATES (HARD EXCLUSION RULES)
+                    # ==============================================================
+                    
+                    def passes_trader_generation_gate(long_strike, short_strike, spot, max_distance_pct):
+                        """
+                        TRADER MODE GENERATION GATE: Hard exclusion before scoring.
+                        At least ONE primary payoff-driving strike must be within max_distance_pct of spot.
+                        If ALL strikes are deep ITM (below spot by more than threshold), reject.
+                        """
+                        long_distance = abs(long_strike - spot) / spot
+                        short_distance = abs(short_strike - spot) / spot if short_strike else float('inf')
+                        
+                        # At least one strike must be within threshold
+                        if long_distance <= max_distance_pct or short_distance <= max_distance_pct:
+                            return True
+                        return False
+                    
+                    def passes_near_atm_anchor_rule(long_strike, short_strike, spot, direction, is_calendar=False):
+                        """
+                        NEAR-ATM ANCHOR RULE: At least one long leg must be near-ATM or slightly OTM.
+                        Deep ITM longs only allowed in calendar/diagonal structures.
+                        """
+                        atm_threshold = spot * 0.08  # 8% from ATM = near-ATM
+                        
+                        # Check if long leg is near-ATM
+                        long_near_atm = abs(long_strike - spot) <= atm_threshold
+                        
+                        # Check if long leg is slightly OTM (directionally aligned)
+                        if direction in ["Bullish", "High Volatility"]:
+                            long_slightly_otm = long_strike > spot and (long_strike - spot) / spot <= 0.15
+                        else:
+                            long_slightly_otm = long_strike < spot and (spot - long_strike) / spot <= 0.15
+                        
+                        if long_near_atm or long_slightly_otm:
+                            return True
+                        
+                        # Deep ITM long allowed only in calendar/diagonal with near-ATM short
+                        if is_calendar and short_strike:
+                            short_near_atm = abs(short_strike - spot) <= atm_threshold
+                            if short_near_atm:
+                                return True
+                        
+                        return False
+                    
+                    def check_calendar_conditions(front_iv, back_iv, front_expiry_days, back_expiry_days):
+                        """
+                        CALENDAR/DIAGONAL GENERATION CONDITIONS:
+                        Returns True if conditions favor calendar/diagonal generation.
+                        """
+                        # Condition 1: Near-term IV lower than back-term IV
+                        if front_iv < back_iv * 0.95:
+                            return True, "Term structure favors calendar (back IV > front IV)"
+                        
+                        # Condition 2: Forward volatility > spot implied volatility
+                        if back_expiry_days > front_expiry_days:
+                            implied_fwd_var = (back_iv**2 * back_expiry_days - front_iv**2 * front_expiry_days) / (back_expiry_days - front_expiry_days)
+                            if implied_fwd_var > 0:
+                                implied_fwd_vol = np.sqrt(implied_fwd_var)
+                                if implied_fwd_vol > front_iv * 1.05:
+                                    return True, "Forward vol elevated vs spot IV"
+                        
+                        # Condition 3: Term structure monotonicity violated (unusual shape)
+                        vol_ratio = back_iv / front_iv if front_iv > 0 else 1
+                        if vol_ratio > 1.15 or vol_ratio < 0.85:
+                            return True, "Term structure anomaly detected"
+                        
+                        return False, None
+                    
+                    def is_deep_itm_candidate(long_strike, short_strike, spot, spread_type):
+                        """
+                        Check if candidate is a deep ITM structure that should be excluded in trader mode.
+                        """
+                        if spread_type == "call":
+                            # Bull call: deep ITM if both strikes significantly below spot
+                            if long_strike < spot * 0.85 and (short_strike is None or short_strike < spot * 0.90):
+                                return True
+                        else:  # put
+                            # Bear put: deep ITM if both strikes significantly above spot
+                            if long_strike > spot * 1.15 and (short_strike is None or short_strike > spot * 1.10):
+                                return True
+                        return False
+                    
+                    def get_calendar_thesis(front_iv, back_iv, direction):
+                        """Generate thesis for calendar/diagonal spreads."""
+                        if back_iv > front_iv:
+                            return "Volatility", "Long back-month vega with front-month theta capture via term structure mismatch"
+                        elif direction in ["Bullish", "Bearish"]:
+                            return "Hybrid", f"{direction} bias with volatility leverage from time-structure convexity"
+                        else:
+                            return "Volatility", "Neutral volatility play exploiting term structure"
                     
                     # ----------------------------------------------
                     # 2. ONE-LINE EV FORMULAS BY STRATEGY TYPE
@@ -2216,6 +2320,7 @@ def main():
                     elif strategy_type == "Bull Call Spread":
                         spread_candidates = []
                         trader_mode_active = trader_mode == "Trader (Convexity)"
+                        candidates_rejected_trader_gate = 0
                         
                         for _, long_call in calls[calls["strike"] <= spot * 1.05].iterrows():
                             for _, short_call in calls[calls["strike"] > long_call["strike"]].iterrows():
@@ -2226,13 +2331,24 @@ def main():
                                 K_short = short_call["strike"]
                                 
                                 # ========================================
-                                # TRADER-FOCUSED CONSTRAINTS
+                                # TRADER-MODE GENERATION GATES (HARD EXCLUSION)
                                 # ========================================
                                 
-                                # 1. STRIKE PROXIMITY CONSTRAINT
                                 if trader_mode_active:
-                                    if not check_spread_proximity(K_long, K_short, spot, strike_proximity):
-                                        continue  # Skip - both strikes too far from spot
+                                    # GATE 1: Deep ITM exclusion - DO NOT GENERATE
+                                    if is_deep_itm_candidate(K_long, K_short, spot, "call"):
+                                        candidates_rejected_trader_gate += 1
+                                        continue  # HARD EXCLUSION - not even generated
+                                    
+                                    # GATE 2: Strike proximity - at least one strike near spot
+                                    if not passes_trader_generation_gate(K_long, K_short, spot, strike_proximity):
+                                        candidates_rejected_trader_gate += 1
+                                        continue  # HARD EXCLUSION
+                                    
+                                    # GATE 3: Near-ATM anchor rule
+                                    if not passes_near_atm_anchor_rule(K_long, K_short, spot, direction):
+                                        candidates_rejected_trader_gate += 1
+                                        continue  # HARD EXCLUSION
                                 
                                 exec_debit = long_call["exec_buy"] - short_call["exec_sell"]
                                 width = short_call["strike"] - long_call["strike"]
@@ -2433,6 +2549,7 @@ def main():
                     elif strategy_type == "Bear Put Spread":
                         spread_candidates = []
                         trader_mode_active = trader_mode == "Trader (Convexity)"
+                        candidates_rejected_trader_gate = 0
                         
                         for _, long_put in puts[puts["strike"] >= spot * 0.95].iterrows():
                             for _, short_put in puts[puts["strike"] < long_put["strike"]].iterrows():
@@ -2442,9 +2559,23 @@ def main():
                                 K_long = long_put["strike"]
                                 K_short = short_put["strike"]
                                 
-                                # TRADER-FOCUSED: Strike proximity check
+                                # ========================================
+                                # TRADER-MODE GENERATION GATES (HARD EXCLUSION)
+                                # ========================================
                                 if trader_mode_active:
-                                    if not check_spread_proximity(K_long, K_short, spot, strike_proximity):
+                                    # GATE 1: Deep ITM exclusion
+                                    if is_deep_itm_candidate(K_long, K_short, spot, "put"):
+                                        candidates_rejected_trader_gate += 1
+                                        continue
+                                    
+                                    # GATE 2: Strike proximity
+                                    if not passes_trader_generation_gate(K_long, K_short, spot, strike_proximity):
+                                        candidates_rejected_trader_gate += 1
+                                        continue
+                                    
+                                    # GATE 3: Near-ATM anchor rule
+                                    if not passes_near_atm_anchor_rule(K_long, K_short, spot, direction):
+                                        candidates_rejected_trader_gate += 1
                                         continue
                                 
                                 exec_debit = long_put["exec_buy"] - short_put["exec_sell"]
@@ -3001,19 +3132,320 @@ def main():
                         else:
                             rejection_reasons.append("Iron Butterfly: Not enough liquid strikes available")
                     
+                    # ============ CALENDAR SPREAD (Trader-Mode Complex Structure) ============
+                    elif strategy_type == "Calendar Spread":
+                        trader_mode_active = trader_mode == "Trader (Convexity)"
+                        calendar_candidates = []
+                        
+                        # Get available expirations
+                        all_exps = hydra.get_expirations(ticker)
+                        if len(all_exps) >= 2:
+                            front_exp = sel_exp
+                            front_days = (datetime.strptime(front_exp, "%Y-%m-%d").date() - date.today()).days
+                            
+                            # Find back-month expiration (30-60 days further out)
+                            back_exps = [e for e in all_exps if e > front_exp]
+                            suitable_backs = []
+                            for be in back_exps[:5]:
+                                be_days = (datetime.strptime(be, "%Y-%m-%d").date() - date.today()).days
+                                if 20 <= (be_days - front_days) <= 90:
+                                    suitable_backs.append((be, be_days))
+                            
+                            if suitable_backs:
+                                back_exp, back_days = suitable_backs[0]
+                                back_chain, _ = hydra.get_chain(ticker, back_exp, spot)
+                                
+                                if back_chain is not None and not back_chain.empty:
+                                    # Add spread calculations to back chain
+                                    back_chain["spread"] = back_chain["ask"] - back_chain["bid"]
+                                    back_chain["spread_pct"] = np.where(back_chain["bid"] > 0, back_chain["spread"] / back_chain["bid"], 1.0)
+                                    
+                                    # Filter back chain for liquidity
+                                    back_liquid = back_chain[
+                                        (back_chain["spread_pct"] <= max_spread_pct) &
+                                        (back_chain["bid"] > 0.01)
+                                    ].copy()
+                                    
+                                    if not back_liquid.empty:
+                                        back_liquid["exec_buy"] = back_liquid["ask"]
+                                        back_liquid["exec_sell"] = back_liquid["bid"]
+                                        back_liquid["slippage"] = back_liquid["spread"] / 2
+                                        
+                                        # Get ATM strike
+                                        atm = atm_strike
+                                        
+                                        # Calendar: same strike, different expiries
+                                        front_opt = calls[calls["strike"] == atm] if direction in ["Bullish", "Neutral", "High Volatility"] else puts[puts["strike"] == atm]
+                                        back_calls = back_liquid[back_liquid["type"] == "call"]
+                                        back_puts = back_liquid[back_liquid["type"] == "put"]
+                                        back_opt = back_calls[back_calls["strike"] == atm] if direction in ["Bullish", "Neutral", "High Volatility"] else back_puts[back_puts["strike"] == atm]
+                                        
+                                        if not front_opt.empty and not back_opt.empty:
+                                            front = front_opt.iloc[0]
+                                            back = back_opt.iloc[0]
+                                            
+                                            front_iv = front.get("impliedVolatility", mkt_iv_calc)
+                                            back_iv = back.get("impliedVolatility", mkt_iv_calc)
+                                            
+                                            # Check calendar conditions
+                                            cal_ok, cal_reason = check_calendar_conditions(front_iv, back_iv, front_days, back_days)
+                                            
+                                            # Calendar: Short front, Long back
+                                            exec_debit = back["exec_buy"] - front["exec_sell"]
+                                            total_slippage = front["slippage"] + back["slippage"]
+                                            
+                                            if exec_debit > 0 and exec_debit > total_slippage:
+                                                # Calendar EV approximation
+                                                # Profit from: back vega exposure + front theta decay - debit
+                                                front_theta = front.get("theta", -0.02)
+                                                back_vega = back.get("vega", 0.1)
+                                                
+                                                # Expected theta capture (assume front decays ~30%)
+                                                theta_gain = abs(front_theta) * front_days * 0.3
+                                                # Expected vega gain (if vol rises 5%)
+                                                vega_gain = back_vega * 0.05
+                                                
+                                                ev = (theta_gain + vega_gain - exec_debit) * 100
+                                                ev_per_risk = ev / (exec_debit * 100) if exec_debit > 0 else 0
+                                                
+                                                # Probability of profit: spot stays near ATM
+                                                move_threshold = spot * mkt_iv_calc * np.sqrt(front_days/365) * 0.5
+                                                d_up = (np.log(spot/(atm + move_threshold))) / (mkt_iv_calc * np.sqrt(front_days/365))
+                                                d_down = (np.log(spot/(atm - move_threshold))) / (mkt_iv_calc * np.sqrt(front_days/365))
+                                                prob_profit = norm.cdf(d_up) - norm.cdf(d_down)
+                                                prob_profit = clamp_probability(prob_profit, front_days/365)
+                                                
+                                                # Calendar thesis
+                                                category, thesis = get_calendar_thesis(front_iv, back_iv, direction)
+                                                
+                                                if cal_ok:
+                                                    thesis = f"{thesis} - {cal_reason}"
+                                                
+                                                opt_type = "CALL" if direction in ["Bullish", "Neutral", "High Volatility"] else "PUT"
+                                                legs = [
+                                                    {"type": opt_type, "strike": atm, "direction": "SHORT", "expiry": front_exp,
+                                                     "bid": front["bid"], "ask": front["ask"], "exec_price": front["exec_sell"]},
+                                                    {"type": opt_type, "strike": atm, "direction": "LONG", "expiry": back_exp,
+                                                     "bid": back["bid"], "ask": back["ask"], "exec_price": back["exec_buy"]}
+                                                ]
+                                                
+                                                trade_metrics["ev_dollars"] = ev
+                                                trade_metrics["ev_per_dollar_risked"] = ev_per_risk
+                                                trade_metrics["prob_profit"] = prob_profit
+                                                trade_metrics["prob_max_profit"] = prob_profit * 0.7
+                                                trade_metrics["prob_confidence"] = 0.6  # Calendar probabilities less certain
+                                                trade_metrics["thesis_category"] = category
+                                                trade_metrics["thesis"] = thesis
+                                                trade_metrics["convexity_score"] = 0.7  # Calendars have term-structure convexity
+                                                trade_metrics["trade_label"] = f"🎯 {category.upper()}"
+                                                trade_metrics["trade_sublabel"] = "Term-structure convexity play"
+                                                liq_score = 1 - max(front["spread_pct"], back["spread_pct"])
+                                                trade_metrics["liquidity_score"] = liq_score
+                                                trade_metrics["max_loss"] = exec_debit * 100
+                                                trade_metrics["complexity"] = 3
+                                                trade_metrics["quality_score"] = calc_trade_quality_score(ev, exec_debit * 100, prob_profit, 0.6, liq_score, 3)
+                                                
+                                                trade_viable = ev > 0
+                                                if not trade_viable:
+                                                    rejection_reasons.append(f"Calendar EV negative: ${ev:.2f}")
+                                            else:
+                                                rejection_reasons.append("Calendar: Debit less than slippage")
+                                        else:
+                                            rejection_reasons.append(f"Calendar: No liquid ATM options at {atm}")
+                                    else:
+                                        rejection_reasons.append("Calendar: Back-month chain illiquid")
+                                else:
+                                    rejection_reasons.append("Calendar: Could not fetch back-month chain")
+                            else:
+                                rejection_reasons.append("Calendar: No suitable back-month expiration (need 20-90 days spread)")
+                        else:
+                            rejection_reasons.append("Calendar: Need at least 2 expirations available")
+                    
+                    # ============ DIAGONAL SPREAD (Trader-Mode Complex Structure) ============
+                    elif strategy_type == "Diagonal Spread":
+                        trader_mode_active = trader_mode == "Trader (Convexity)"
+                        
+                        all_exps = hydra.get_expirations(ticker)
+                        if len(all_exps) >= 2:
+                            front_exp = sel_exp
+                            front_days = (datetime.strptime(front_exp, "%Y-%m-%d").date() - date.today()).days
+                            
+                            back_exps = [e for e in all_exps if e > front_exp]
+                            suitable_backs = []
+                            for be in back_exps[:5]:
+                                be_days = (datetime.strptime(be, "%Y-%m-%d").date() - date.today()).days
+                                if 20 <= (be_days - front_days) <= 90:
+                                    suitable_backs.append((be, be_days))
+                            
+                            if suitable_backs:
+                                back_exp, back_days = suitable_backs[0]
+                                back_chain, _ = hydra.get_chain(ticker, back_exp, spot)
+                                
+                                if back_chain is not None and not back_chain.empty:
+                                    # Add spread calculations to back chain
+                                    back_chain["spread"] = back_chain["ask"] - back_chain["bid"]
+                                    back_chain["spread_pct"] = np.where(back_chain["bid"] > 0, back_chain["spread"] / back_chain["bid"], 1.0)
+                                    
+                                    back_liquid = back_chain[
+                                        (back_chain["spread_pct"] <= max_spread_pct) &
+                                        (back_chain["bid"] > 0.01)
+                                    ].copy()
+                                    
+                                    if not back_liquid.empty:
+                                        back_liquid["exec_buy"] = back_liquid["ask"]
+                                        back_liquid["exec_sell"] = back_liquid["bid"]
+                                        back_liquid["slippage"] = back_liquid["spread"] / 2
+                                        
+                                        atm = atm_strike
+                                        
+                                        if direction in ["Bullish", "High Volatility"]:
+                                            # Bullish diagonal: Short near-term ATM call, Long back-month OTM call
+                                            front_opt = calls[calls["strike"] == atm]
+                                            back_calls = back_liquid[back_liquid["type"] == "call"]
+                                            back_otm = back_calls[back_calls["strike"] > atm * 1.02]
+                                            
+                                            if not front_opt.empty and not back_otm.empty:
+                                                front = front_opt.iloc[0]
+                                                back = back_otm.iloc[0]
+                                                
+                                                exec_debit = back["exec_buy"] - front["exec_sell"]
+                                                total_slippage = front["slippage"] + back["slippage"]
+                                                
+                                                if exec_debit > 0 and exec_debit > total_slippage:
+                                                    front_iv = front.get("impliedVolatility", mkt_iv_calc)
+                                                    back_iv = back.get("impliedVolatility", mkt_iv_calc)
+                                                    
+                                                    # Diagonal EV: directional + calendar component
+                                                    front_theta = front.get("theta", -0.02)
+                                                    back_delta = back.get("delta", 0.4)
+                                                    back_vega = back.get("vega", 0.1)
+                                                    
+                                                    # Expected move contribution
+                                                    expected_move = spot * mkt_iv_calc * np.sqrt(back_days/365) * 0.3
+                                                    delta_gain = back_delta * expected_move
+                                                    theta_gain = abs(front_theta) * front_days * 0.25
+                                                    
+                                                    ev = (delta_gain + theta_gain - exec_debit) * 100
+                                                    ev_per_risk = ev / (exec_debit * 100) if exec_debit > 0 else 0
+                                                    
+                                                    # Probability: favorable move in underlying
+                                                    d_target = (np.log(spot/(back["strike"] - exec_debit)) + (rf/100)*back_days/365) / (mkt_iv_calc * np.sqrt(back_days/365))
+                                                    prob_profit = norm.cdf(d_target)
+                                                    prob_profit = clamp_probability(prob_profit, back_days/365)
+                                                    
+                                                    legs = [
+                                                        {"type": "CALL", "strike": atm, "direction": "SHORT", "expiry": front_exp,
+                                                         "bid": front["bid"], "ask": front["ask"], "exec_price": front["exec_sell"]},
+                                                        {"type": "CALL", "strike": back["strike"], "direction": "LONG", "expiry": back_exp,
+                                                         "bid": back["bid"], "ask": back["ask"], "exec_price": back["exec_buy"]}
+                                                    ]
+                                                    
+                                                    trade_metrics["ev_dollars"] = ev
+                                                    trade_metrics["ev_per_dollar_risked"] = ev_per_risk
+                                                    trade_metrics["prob_profit"] = prob_profit
+                                                    trade_metrics["prob_max_profit"] = prob_profit * 0.6
+                                                    trade_metrics["prob_confidence"] = 0.55
+                                                    trade_metrics["thesis_category"] = "Hybrid"
+                                                    trade_metrics["thesis"] = f"Bullish bias with volatility leverage via time-structure convexity"
+                                                    trade_metrics["convexity_score"] = 0.65
+                                                    trade_metrics["trade_label"] = "🎯 DIRECTIONAL + VOL"
+                                                    trade_metrics["trade_sublabel"] = "Diagonal with upside convexity"
+                                                    liq_score = 1 - max(front["spread_pct"], back["spread_pct"])
+                                                    trade_metrics["liquidity_score"] = liq_score
+                                                    trade_metrics["max_loss"] = exec_debit * 100
+                                                    trade_metrics["complexity"] = 3
+                                                    trade_metrics["quality_score"] = calc_trade_quality_score(ev, exec_debit * 100, prob_profit, 0.55, liq_score, 3)
+                                                    
+                                                    trade_viable = ev > 0
+                                                    if not trade_viable:
+                                                        rejection_reasons.append(f"Diagonal EV negative: ${ev:.2f}")
+                                                else:
+                                                    rejection_reasons.append("Diagonal: Debit less than slippage")
+                                            else:
+                                                rejection_reasons.append("Diagonal: No liquid OTM back-month options")
+                                        
+                                        elif direction in ["Bearish"]:
+                                            # Bearish diagonal: Short near-term ATM put, Long back-month OTM put
+                                            front_opt = puts[puts["strike"] == atm]
+                                            back_puts = back_liquid[back_liquid["type"] == "put"]
+                                            back_otm = back_puts[back_puts["strike"] < atm * 0.98]
+                                            
+                                            if not front_opt.empty and not back_otm.empty:
+                                                front = front_opt.iloc[0]
+                                                back = back_otm.iloc[-1]
+                                                
+                                                exec_debit = back["exec_buy"] - front["exec_sell"]
+                                                total_slippage = front["slippage"] + back["slippage"]
+                                                
+                                                if exec_debit > 0 and exec_debit > total_slippage:
+                                                    front_theta = front.get("theta", -0.02)
+                                                    back_delta = back.get("delta", -0.4)
+                                                    
+                                                    expected_move = spot * mkt_iv_calc * np.sqrt(back_days/365) * 0.3
+                                                    delta_gain = abs(back_delta) * expected_move
+                                                    theta_gain = abs(front_theta) * front_days * 0.25
+                                                    
+                                                    ev = (delta_gain + theta_gain - exec_debit) * 100
+                                                    ev_per_risk = ev / (exec_debit * 100) if exec_debit > 0 else 0
+                                                    
+                                                    d_target = (np.log(spot/(back["strike"] + exec_debit)) + (rf/100)*back_days/365) / (mkt_iv_calc * np.sqrt(back_days/365))
+                                                    prob_profit = 1 - norm.cdf(d_target)
+                                                    prob_profit = clamp_probability(prob_profit, back_days/365)
+                                                    
+                                                    legs = [
+                                                        {"type": "PUT", "strike": atm, "direction": "SHORT", "expiry": front_exp,
+                                                         "bid": front["bid"], "ask": front["ask"], "exec_price": front["exec_sell"]},
+                                                        {"type": "PUT", "strike": back["strike"], "direction": "LONG", "expiry": back_exp,
+                                                         "bid": back["bid"], "ask": back["ask"], "exec_price": back["exec_buy"]}
+                                                    ]
+                                                    
+                                                    trade_metrics["ev_dollars"] = ev
+                                                    trade_metrics["ev_per_dollar_risked"] = ev_per_risk
+                                                    trade_metrics["prob_profit"] = prob_profit
+                                                    trade_metrics["prob_max_profit"] = prob_profit * 0.6
+                                                    trade_metrics["prob_confidence"] = 0.55
+                                                    trade_metrics["thesis_category"] = "Hybrid"
+                                                    trade_metrics["thesis"] = f"Bearish bias with volatility leverage via time-structure convexity"
+                                                    trade_metrics["convexity_score"] = 0.65
+                                                    trade_metrics["trade_label"] = "🎯 DIRECTIONAL + VOL"
+                                                    trade_metrics["trade_sublabel"] = "Diagonal with downside convexity"
+                                                    liq_score = 1 - max(front["spread_pct"], back["spread_pct"])
+                                                    trade_metrics["liquidity_score"] = liq_score
+                                                    trade_metrics["max_loss"] = exec_debit * 100
+                                                    trade_metrics["complexity"] = 3
+                                                    trade_metrics["quality_score"] = calc_trade_quality_score(ev, exec_debit * 100, prob_profit, 0.55, liq_score, 3)
+                                                    
+                                                    trade_viable = ev > 0
+                                                    if not trade_viable:
+                                                        rejection_reasons.append(f"Diagonal EV negative: ${ev:.2f}")
+                                                else:
+                                                    rejection_reasons.append("Diagonal: Debit less than slippage")
+                                            else:
+                                                rejection_reasons.append("Diagonal: No liquid OTM back-month puts")
+                                        else:
+                                            rejection_reasons.append("Diagonal: Select Bullish or Bearish direction")
+                                    else:
+                                        rejection_reasons.append("Diagonal: Back-month chain illiquid")
+                                else:
+                                    rejection_reasons.append("Diagonal: Could not fetch back-month chain")
+                            else:
+                                rejection_reasons.append("Diagonal: No suitable back-month expiration")
+                        else:
+                            rejection_reasons.append("Diagonal: Need at least 2 expirations available")
+                    
                     # ============ DISPLAY RESULTS (Capital Allocator Output) ============
-                    if legs and trade_viable and trade_metrics["ev_dollars"] is not None and trade_metrics["ev_dollars"] > 0:
-                        ev = trade_metrics["ev_dollars"]
-                        ev_per_risk = trade_metrics["ev_per_dollar_risked"] or 0
-                        prob_profit = trade_metrics["prob_profit"] or 0
-                        prob_max_profit = trade_metrics.get("prob_max_profit", prob_profit)
-                        prob_max_loss = trade_metrics.get("prob_max_loss", 0)
-                        prob_conf = trade_metrics.get("prob_confidence", 0.7)
-                        tail_eps = trade_metrics.get("tail_epsilon", 0.01)
-                        is_deep_itm = trade_metrics.get("is_deep_itm", False)
-                        quality = trade_metrics.get("quality_score", 0)
-                        trade_label = trade_metrics.get("trade_label", "✅ ACCEPTABLE")
-                        trade_sublabel = trade_metrics.get("trade_sublabel", "")
+                    if legs and trade_viable and trade_metrics.get("ev_dollars") is not None and trade_metrics.get("ev_dollars", 0) > 0:
+                        ev = trade_metrics.get("ev_dollars", 0) or 0
+                        ev_per_risk = trade_metrics.get("ev_per_dollar_risked", 0) or 0
+                        prob_profit = trade_metrics.get("prob_profit", 0) or 0
+                        prob_max_profit = trade_metrics.get("prob_max_profit") or prob_profit or 0
+                        prob_max_loss = trade_metrics.get("prob_max_loss") or 0
+                        prob_conf = trade_metrics.get("prob_confidence") or 0.7
+                        tail_eps = trade_metrics.get("tail_epsilon") or 0.01
+                        is_deep_itm = trade_metrics.get("is_deep_itm", False) or False
+                        quality = trade_metrics.get("quality_score") or 0.5
+                        trade_label = trade_metrics.get("trade_label") or "✅ ACCEPTABLE"
+                        trade_sublabel = trade_metrics.get("trade_sublabel") or ""
                         complexity = trade_metrics.get("complexity", 1)
                         
                         # TRADE QUALITY HEADER
@@ -3297,21 +3729,45 @@ Equity-substitute and deep-ITM structures are rejected by default.
                             for reason in rejection_reasons:
                                 st.caption(f"• {reason}")
                             
-                            st.info("""
-                            **What this means:**
-                            - Expected value is ≤ $0 after slippage
-                            - Probability-weighted outcomes don't justify the trade
-                            - Liquidity/execution costs consume theoretical edge
-                            - Trade quality score below minimum threshold
-                            
-                            **Try:**
-                            - Different expiration (front-month usually more liquid)
-                            - Closer to ATM strikes
-                            - Different strategy type
-                            - Wait for better market conditions
-                            """)
+                            # Check if trader mode is active for specific suggestions
+                            if trader_mode == "Trader (Convexity)":
+                                st.info("""
+                                **Trader Mode Active - What this means:**
+                                - Deep ITM and equity-substitute structures were NOT generated
+                                - All candidates must have convex payoff characteristics
+                                - At least one strike must be near-ATM
+                                
+                                **Try:**
+                                - Calendar Spread or Diagonal Spread for term-structure convexity
+                                - Closer expiration (more gamma)
+                                - ATM or slightly OTM strikes for convexity
+                                - Switch to "Capital Substitution" mode for deep ITM access
+                                """)
+                            else:
+                                st.info("""
+                                **What this means:**
+                                - Expected value is ≤ $0 after slippage
+                                - Probability-weighted outcomes don't justify the trade
+                                - Liquidity/execution costs consume theoretical edge
+                                
+                                **Try:**
+                                - Different expiration (front-month usually more liquid)
+                                - Closer to ATM strikes
+                                - Different strategy type
+                                - Wait for better market conditions
+                                """)
                     else:
-                        st.warning("⚠️ Could not construct strategy. No liquid options meet criteria.")
+                        if trader_mode == "Trader (Convexity)":
+                            st.warning("""
+                            ⚠️ **No trade meets trader-grade convexity and proximity requirements.**
+                            
+                            Consider:
+                            • Adjusting strike distance threshold
+                            • Trying Calendar or Diagonal spreads for term convexity
+                            • Enabling "Capital Substitution" mode for equity-like structures
+                            """)
+                        else:
+                            st.warning("⚠️ Could not construct strategy. No liquid options meet criteria.")
 
     # ==========================================
     # MODULE C: SNIPER (Single Stock Deep Dive)
@@ -3581,14 +4037,23 @@ Equity-substitute and deep-ITM structures are rejected by default.
             with sc3:
                 min_confidence = st.slider("Min Confidence %", 50, 95, 80)
 
+        # Single-name stocks only (no ETFs) - High volume, quality tickers
         TICKER_LIST = [
-            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE", "CRM", "AMD", "QCOM", "TXN", "INTC", "IBM", "MU", "NOW", "UBER", "PANW",
-            "JPM", "BAC", "V", "MA", "WFC", "GS", "MS", "AXP", "BLK", "C", "PYPL", "HOOD", "COIN", "SOFI",
-            "WMT", "COST", "PG", "HD", "KO", "PEP", "MCD", "DIS", "NKE", "SBUX", "TGT", "LOW", "TJX",
-            "LLY", "UNH", "JNJ", "MRK", "ABBV", "TMO", "PFE", "AMGN", "ISRG", "BMY", "GILD", "CVS",
-            "CAT", "DE", "HON", "GE", "UNP", "UPS", "BA", "LMT", "RTX", "XOM", "CVX", "COP", "SLB", "EOG",
+            # Mega-cap Tech
+            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE", 
+            "CRM", "AMD", "QCOM", "TXN", "INTC", "IBM", "MU", "NOW", "UBER", "PANW", "SNOW", "NET", "CRWD", "DDOG", "ZS",
+            # Financials
+            "JPM", "BAC", "V", "MA", "WFC", "GS", "MS", "AXP", "BLK", "C", "PYPL", "HOOD", "COIN", "SOFI", "SCHW", "CME",
+            # Consumer
+            "WMT", "COST", "PG", "HD", "KO", "PEP", "MCD", "DIS", "NKE", "SBUX", "TGT", "LOW", "TJX", "LULU", "CMG", "YUM",
+            # Healthcare
+            "LLY", "UNH", "JNJ", "MRK", "ABBV", "TMO", "PFE", "AMGN", "ISRG", "BMY", "GILD", "CVS", "MDT", "DHR", "ABT",
+            # Industrial & Energy
+            "CAT", "DE", "HON", "GE", "UNP", "UPS", "BA", "LMT", "RTX", "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "HAL",
+            # High-Beta / Momentum
             "MSTR", "MARA", "PLTR", "DKNG", "ROKU", "SQ", "AFRM", "RIOT", "CLSK", "CVNA", "UPST", "AI", "GME", "AMC",
-            "SPY", "QQQ", "IWM", "DIA", "TLT",
+            # Additional Quality Names
+            "NFLX", "BKNG", "ABNB", "SHOP", "SQ", "SPOT", "SNAP", "PINS", "RBLX", "U", "TTD", "TEAM", "DOCU", "ZM",
         ]
 
         @st.cache_data(ttl=600)
@@ -3840,6 +4305,1041 @@ Equity-substitute and deep-ITM structures are rejected by default.
                     st.error("Scan returned no data. Please check API connection.")
         else:
             st.info("🦅 **Ready to Hunt.** Click to scan 100+ assets using the Ryan Model — momentum, squeeze, trap detection, and relative strength.")
+
+    # ==========================================
+    # MODULE E: OPTION HUNTER (Options Scanner)
+    # ==========================================
+    elif mode == "🔍 Opt Hunt":
+        st.title("🔍 Option Hunter: Mispriced Options Scanner")
+        st.caption("Scan the market for underpriced options with edge")
+        
+        # Scanner Settings
+        st.markdown("### ⚙️ Scanner Configuration")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            dte_range = st.selectbox("Days to Expiration", ["7-14 days", "14-30 days", "30-60 days", "60-90 days"], index=1)
+        with col2:
+            scan_direction = st.selectbox("Direction", ["Bullish (Calls)", "Bearish (Puts)", "Both"])
+        with col3:
+            min_pop = st.slider("Min PoP %", 30, 80, 50)
+        with col4:
+            max_spread_pct = st.slider("Max Spread %", 5, 30, 15)
+        
+        col5, col6, col7, col8 = st.columns(4)
+        with col5:
+            min_edge = st.slider("Min Edge %", 0, 30, 5)
+        with col6:
+            max_otm_pct = st.slider("Max OTM %", 5, 30, 15)
+        with col7:
+            rf_rate = st.number_input("Risk Free %", value=4.5, step=0.1)
+        with col8:
+            max_results = st.selectbox("Top Results", [5, 10, 20, 50], index=1)
+        
+        st.caption("💡 Single-name stocks only. For ETF options, use **📊 ETF Opts** module.")
+        
+        # No ETFs in this scanner - they have their own module
+        INDEX_ETFS = set()  # Empty set - no ETFs
+        allow_index_etfs = False
+        prefer_single_names = True
+        
+        # Parse DTE range
+        dte_map = {
+            "7-14 days": (7, 14),
+            "14-30 days": (14, 30),
+            "30-60 days": (30, 60),
+            "60-90 days": (60, 90)
+        }
+        min_dte, max_dte = dte_map[dte_range]
+        
+        # Stock Universe (same as Hunter) - Single names first, then ETFs
+        # Single-name stocks only (no ETFs) - High volume, optionable tickers
+        OPT_TICKER_LIST = [
+            # Mega-cap Tech (highest options liquidity)
+            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE", 
+            "CRM", "AMD", "QCOM", "TXN", "INTC", "IBM", "MU", "NOW", "UBER", "PANW", "SNOW", "NET", "CRWD", "DDOG",
+            # Financials
+            "JPM", "BAC", "V", "MA", "WFC", "GS", "MS", "AXP", "BLK", "C", "PYPL", "COIN", "HOOD", "SCHW",
+            # Consumer
+            "WMT", "COST", "PG", "HD", "KO", "PEP", "MCD", "DIS", "NKE", "SBUX", "LULU", "CMG",
+            # Healthcare
+            "LLY", "UNH", "JNJ", "MRK", "ABBV", "TMO", "PFE", "AMGN", "ISRG", "MDT",
+            # Industrial & Energy
+            "CAT", "DE", "HON", "GE", "UNP", "BA", "LMT", "RTX", "XOM", "CVX", "COP", "SLB", "EOG", "OXY",
+            # High-Beta / Momentum (great for options)
+            "MSTR", "MARA", "PLTR", "DKNG", "ROKU", "SQ", "RIOT", "CVNA", "GME", "AMC",
+            # Additional High-Volume Options Names
+            "NFLX", "BKNG", "ABNB", "SHOP", "SPOT", "SNAP", "RBLX", "TTD",
+        ]
+        
+        @st.cache_data(ttl=300, show_spinner=False)
+        def scan_options_universe(tickers, min_dte, max_dte, direction, min_pop_thresh, max_spread, min_edge_pct, max_otm, rf, index_etf_set, apply_index_penalty):
+            """Scan multiple tickers for underpriced options"""
+            results = []
+            hydra_scan = HydraEngine()
+            
+            for ticker in tickers:
+                try:
+                    # Get spot price
+                    spot, _ = hydra_scan.get_spot(ticker)
+                    if spot is None or spot <= 0:
+                        continue
+                    
+                    # Get expirations
+                    exps = hydra_scan.get_expirations(ticker)
+                    if not exps:
+                        continue
+                    
+                    # Find expiration in target range
+                    target_exp = None
+                    target_dte = None
+                    for exp in exps:
+                        try:
+                            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+                            dte = (exp_date - date.today()).days
+                            if min_dte <= dte <= max_dte:
+                                target_exp = exp
+                                target_dte = dte
+                                break
+                        except:
+                            continue
+                    
+                    if not target_exp:
+                        continue
+                    
+                    # Get options chain
+                    chain, _ = hydra_scan.get_chain(ticker, target_exp, spot)
+                    if chain is None or chain.empty:
+                        continue
+                    
+                    # Add spread calculations
+                    chain["spread"] = chain["ask"] - chain["bid"]
+                    chain["spread_pct"] = np.where(chain["bid"] > 0, (chain["spread"] / chain["bid"]) * 100, 100)
+                    
+                    # Filter by type based on direction
+                    if direction == "Bullish (Calls)":
+                        chain = chain[chain["type"] == "call"]
+                    elif direction == "Bearish (Puts)":
+                        chain = chain[chain["type"] == "put"]
+                    
+                    # Liquidity filter
+                    liquid_chain = chain[
+                        (chain["spread_pct"] <= max_spread) &
+                        (chain["bid"] > 0.05) &
+                        ((chain["volume"] >= 10) | (chain["openInterest"] >= 100))
+                    ].copy()
+                    
+                    if liquid_chain.empty:
+                        continue
+                    
+                    # Calculate OTM percentage and filter
+                    liquid_chain["otm_pct"] = np.where(
+                        liquid_chain["type"] == "call",
+                        ((liquid_chain["strike"] - spot) / spot) * 100,
+                        ((spot - liquid_chain["strike"]) / spot) * 100
+                    )
+                    
+                    # Filter: slightly OTM to max_otm (no deep ITM)
+                    liquid_chain = liquid_chain[(liquid_chain["otm_pct"] >= -5) & (liquid_chain["otm_pct"] <= max_otm)]
+                    
+                    if liquid_chain.empty:
+                        continue
+                    
+                    # Calculate model prices and edge for remaining options
+                    T = target_dte / 365.0
+                    
+                    for _, row in liquid_chain.iterrows():
+                        try:
+                            strike = row["strike"]
+                            opt_type = row["type"]
+                            market_mid = (row["bid"] + row["ask"]) / 2
+                            iv = row.get("impliedVolatility", 0.3)
+                            if iv <= 0 or iv > 3:
+                                iv = 0.3
+                            
+                            # Calculate model price (BSM)
+                            kernel = PricingKernel(spot, strike, T, rf / 100, iv, opt_type)
+                            model_price = kernel.price_bsm()
+                            
+                            # Edge calculation (buy at ASK, so edge = model - ask)
+                            ask_price = row["ask"]
+                            edge = model_price - ask_price
+                            edge_pct = (edge / ask_price * 100) if ask_price > 0 else 0
+                            
+                            # Skip if not underpriced enough
+                            if edge_pct < min_edge_pct:
+                                continue
+                            
+                            # Calculate PoP using delta proxy
+                            greeks = kernel.get_greeks()
+                            delta = greeks.delta
+                            
+                            # PoP approximation: for long calls, P(ITM) ~ |delta|
+                            # Adjust for direction and account for theta decay
+                            if opt_type == "call":
+                                pop_raw = abs(delta)
+                            else:
+                                pop_raw = abs(delta)
+                            
+                            # Adjust PoP for OTM options (they need larger moves)
+                            pop_adjusted = pop_raw * (1 - row["otm_pct"] / 100 * 0.5)
+                            pop_adjusted = max(0.05, min(0.95, pop_adjusted))
+                            
+                            # Skip if below min PoP
+                            if pop_adjusted * 100 < min_pop_thresh:
+                                continue
+                            
+                            # Calculate expected value
+                            # EV = PoP * avg_profit - (1-PoP) * cost
+                            breakeven_move = (strike + ask_price - spot) / spot if opt_type == "call" else (spot - strike + ask_price) / spot
+                            potential_profit = model_price * 1.5 - ask_price  # Conservative upside
+                            ev = pop_adjusted * potential_profit - (1 - pop_adjusted) * ask_price
+                            ev_per_risk = (ev / ask_price) if ask_price > 0 else 0
+                            
+                            # Quality score (base)
+                            quality_base = (edge_pct / 100) * 0.3 + pop_adjusted * 0.4 + (1 - row["spread_pct"] / max_spread) * 0.3
+                            
+                            # Check if this is an index ETF
+                            is_index = ticker in index_etf_set
+                            
+                            # Apply index ETF penalty if requested (15% penalty to prevent crowding out single names)
+                            if is_index and apply_index_penalty:
+                                quality = quality_base * 0.85
+                            else:
+                                quality = quality_base
+                            
+                            results.append({
+                                "Ticker": ticker,
+                                "Type": opt_type.upper(),
+                                "Strike": strike,
+                                "Expiry": target_exp,
+                                "DTE": target_dte,
+                                "Spot": spot,
+                                "OTM%": row["otm_pct"],
+                                "Bid": row["bid"],
+                                "Ask": row["ask"],
+                                "Model": model_price,
+                                "Edge$": edge,
+                                "Edge%": edge_pct,
+                                "PoP%": pop_adjusted * 100,
+                                "EV$": ev,
+                                "Delta": delta,
+                                "IV": iv * 100,
+                                "Spread%": row["spread_pct"],
+                                "Volume": row["volume"],
+                                "OI": row["openInterest"],
+                                "Quality": quality,
+                                "QualityRaw": quality_base,
+                                "IsETF": is_index
+                            })
+                            
+                        except Exception as opt_err:
+                            continue
+                            
+                except Exception as ticker_err:
+                    continue
+            
+            return pd.DataFrame(results)
+        
+        # Run Scanner
+        if st.button("🚀 Scan for Underpriced Options", type="primary", use_container_width=True):
+            progress_bar = st.progress(0, text="Initializing scanner...")
+            
+            with st.spinner(f"Scanning {len(OPT_TICKER_LIST)} tickers for mispriced options..."):
+                progress_bar.progress(20, text="Fetching options chains...")
+                
+                df_results = scan_options_universe(
+                    OPT_TICKER_LIST, 
+                    min_dte, 
+                    max_dte, 
+                    scan_direction, 
+                    min_pop, 
+                    max_spread_pct, 
+                    min_edge, 
+                    max_otm_pct,
+                    rf_rate,
+                    INDEX_ETFS,
+                    prefer_single_names
+                )
+                
+                progress_bar.progress(90, text="Ranking opportunities...")
+                
+                if df_results is not None and not df_results.empty:
+                    progress_bar.progress(100, text="Scan complete!")
+                    progress_bar.empty()
+                    
+                    # ============ PER-SYMBOL RANKING (Step 1) ============
+                    # For each ticker, keep only the best option (top 1 per symbol)
+                    df_results = df_results.sort_values("Quality", ascending=False)
+                    best_per_symbol = df_results.groupby("Ticker").head(1).copy()
+                    
+                    # ============ DIVERSITY ENFORCEMENT (Step 2) ============
+                    # Separate single names from ETFs
+                    single_name_results = best_per_symbol[~best_per_symbol["IsETF"]]
+                    etf_results = best_per_symbol[best_per_symbol["IsETF"]]
+                    
+                    # Check if we have any single names
+                    has_single_names = len(single_name_results) > 0
+                    only_etfs = len(single_name_results) == 0 and len(etf_results) > 0
+                    
+                    # Build diverse final list: prioritize single names, fill with ETFs if needed
+                    if has_single_names:
+                        # Take top single names first
+                        final_results = single_name_results.head(max_results)
+                        
+                        # If we still have room and ETFs are allowed, add some ETFs
+                        remaining_slots = max_results - len(final_results)
+                        if remaining_slots > 0 and allow_index_etfs and len(etf_results) > 0:
+                            # Add at most 2 ETFs even if more slots available (diversity rule)
+                            etf_to_add = min(remaining_slots, 2)
+                            final_results = pd.concat([final_results, etf_results.head(etf_to_add)])
+                    else:
+                        # Only ETFs passed filters
+                        final_results = etf_results.head(max_results)
+                    
+                    # Sort final results by Quality
+                    final_results = final_results.sort_values("Quality", ascending=False)
+                    
+                    # ============ EXPLICIT ETF-ONLY WARNING ============
+                    if only_etfs:
+                        st.warning("""
+                        ⚠️ **Only Index ETF structures currently satisfy your quality filters.**
+                        
+                        No single-name stocks passed the minimum criteria. Consider:
+                        - Lowering Min Edge % or Min PoP %
+                        - Increasing Max Spread %
+                        - Trying a different DTE range
+                        """)
+                    
+                    # Stats summary
+                    st.markdown("---")
+                    st.markdown("### 📊 Scan Results")
+                    
+                    stat1, stat2, stat3, stat4, stat5 = st.columns(5)
+                    with stat1:
+                        st.metric("Diverse Ideas", len(final_results))
+                    with stat2:
+                        st.metric("Total Options Scanned", len(df_results))
+                    with stat3:
+                        avg_edge = final_results["Edge%"].mean() if len(final_results) > 0 else 0
+                        st.metric("Avg Edge %", f"{avg_edge:.1f}%")
+                    with stat4:
+                        avg_pop = final_results["PoP%"].mean() if len(final_results) > 0 else 0
+                        st.metric("Avg PoP %", f"{avg_pop:.1f}%")
+                    with stat5:
+                        single_count = len(final_results[~final_results["IsETF"]]) if len(final_results) > 0 else 0
+                        etf_count = len(final_results[final_results["IsETF"]]) if len(final_results) > 0 else 0
+                        st.metric("Singles / ETFs", f"{single_count} / {etf_count}")
+                    
+                    st.markdown("---")
+                    
+                    # Top Opportunities (Diverse Selection)
+                    st.subheader(f"🎯 Top Underpriced Options — Diverse Selection ({len(final_results)} unique tickers)")
+                    
+                    # Style function for the dataframe
+                    def style_results(df):
+                        def highlight_edge(val):
+                            try:
+                                if val >= 15:
+                                    return "background-color: #10B981; color: white; font-weight: bold"
+                                elif val >= 10:
+                                    return "background-color: #34D399; color: white"
+                                elif val >= 5:
+                                    return "background-color: #6EE7B7"
+                            except:
+                                pass
+                            return ""
+                        
+                        def highlight_pop(val):
+                            try:
+                                if val >= 70:
+                                    return "background-color: #3B82F6; color: white; font-weight: bold"
+                                elif val >= 60:
+                                    return "background-color: #60A5FA; color: white"
+                                elif val >= 50:
+                                    return "background-color: #93C5FD"
+                            except:
+                                pass
+                            return ""
+                        
+                        def highlight_quality(val):
+                            try:
+                                if val >= 0.7:
+                                    return "background-color: #F59E0B; color: white; font-weight: bold"
+                                elif val >= 0.5:
+                                    return "background-color: #FBBF24"
+                            except:
+                                pass
+                            return ""
+                        
+                        def highlight_class(val):
+                            if "ETF" in str(val):
+                                return "background-color: #6366F1; color: white"
+                            return "background-color: #10B981; color: white"
+                        
+                        # Apply styling only to columns that exist
+                        styled = df.style
+                        if "Edge%" in df.columns:
+                            styled = styled.applymap(highlight_edge, subset=["Edge%"])
+                        if "PoP%" in df.columns:
+                            styled = styled.applymap(highlight_pop, subset=["PoP%"])
+                        if "Quality" in df.columns:
+                            styled = styled.applymap(highlight_quality, subset=["Quality"])
+                        if "Class" in df.columns:
+                            styled = styled.applymap(highlight_class, subset=["Class"])
+                        
+                        # Build format dict only for columns that exist
+                        format_dict = {}
+                        col_formats = {
+                            "Strike": "${:.2f}", "Spot": "${:.2f}", "OTM%": "{:.1f}%",
+                            "Bid": "${:.2f}", "Ask": "${:.2f}", "Model": "${:.2f}",
+                            "Edge$": "${:.2f}", "Edge%": "{:.1f}%", "PoP%": "{:.1f}%",
+                            "EV$": "${:.2f}", "Delta": "{:.2f}", "IV": "{:.1f}%",
+                            "Spread%": "{:.1f}%", "Quality": "{:.2f}", "Volume": "{:.0f}", "OI": "{:.0f}"
+                        }
+                        for col, fmt in col_formats.items():
+                            if col in df.columns:
+                                format_dict[col] = fmt
+                        
+                        styled = styled.format(format_dict)
+                        return styled
+                    
+                    # Display columns selection (add ETF indicator)
+                    display_cols = ["Ticker", "Type", "Strike", "DTE", "Spot", "OTM%", "Ask", "Model", "Edge%", "PoP%", "Delta", "IV", "Quality", "IsETF"]
+                    
+                    # Create display copy with ETF label
+                    display_df = final_results[display_cols].copy()
+                    display_df["Class"] = display_df["IsETF"].apply(lambda x: "📊 ETF" if x else "📈 Stock")
+                    display_df = display_df.drop(columns=["IsETF"])
+                    
+                    st.dataframe(
+                        style_results(display_df),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                            "Type": st.column_config.TextColumn("Type", width="small"),
+                            "Class": st.column_config.TextColumn("Class", width="small"),
+                            "Quality": st.column_config.ProgressColumn("Quality", format="%.2f", min_value=0, max_value=1)
+                        }
+                    )
+                    
+                    # Detailed view expander - show ALL candidates per symbol
+                    with st.expander("📋 Full Results (All Options, All Tickers)"):
+                        st.caption("This shows all options found before per-symbol deduplication")
+                        full_display = df_results.copy()
+                        full_display["Class"] = full_display["IsETF"].apply(lambda x: "📊 ETF" if x else "📈 Stock")
+                        st.dataframe(
+                            style_results(full_display.drop(columns=["IsETF", "QualityRaw"])),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    
+                    # Best by ticker - now separated by class
+                    st.markdown("---")
+                    
+                    col_single, col_etf = st.columns(2)
+                    
+                    with col_single:
+                        st.subheader("📈 Top Single-Name Stocks")
+                        single_names_top = best_per_symbol[~best_per_symbol["IsETF"]].head(15)
+                        if not single_names_top.empty:
+                            single_display = single_names_top[["Ticker", "Type", "Strike", "Edge%", "PoP%", "Quality"]].copy()
+                            st.dataframe(
+                                single_display.style.format({"Strike": "${:.2f}", "Edge%": "{:.1f}%", "PoP%": "{:.1f}%", "Quality": "{:.2f}"}),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                        else:
+                            st.info("No single-name stocks passed filters")
+                    
+                    with col_etf:
+                        st.subheader("📊 Index ETFs")
+                        etf_top = best_per_symbol[best_per_symbol["IsETF"]].head(5)
+                        if not etf_top.empty:
+                            etf_display = etf_top[["Ticker", "Type", "Strike", "Edge%", "PoP%", "Quality"]].copy()
+                            st.dataframe(
+                                etf_display.style.format({"Strike": "${:.2f}", "Edge%": "{:.1f}%", "PoP%": "{:.1f}%", "Quality": "{:.2f}"}),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                        else:
+                            if allow_index_etfs:
+                                st.info("No index ETFs passed filters")
+                            else:
+                                st.info("Index ETFs excluded by preference")
+                    
+                    # Key
+                    st.markdown("---")
+                    st.markdown("""
+                    ### 🔑 Option Hunter Key
+                    
+                    | Column | Meaning |
+                    |--------|---------|
+                    | **Edge%** | (Model Price - Ask) / Ask — higher = more underpriced |
+                    | **PoP%** | Probability of Profit based on delta proxy |
+                    | **Quality** | Composite score: 30% edge + 40% PoP + 30% liquidity |
+                    | **OTM%** | How far out-of-the-money (negative = ITM) |
+                    | **Model** | Black-Scholes theoretical fair value |
+                    | **Class** | 📈 Stock (single name) or 📊 ETF (index) |
+                    
+                    **Color Coding:**
+                    - 🟢 Green Edge% = Significant mispricing (>5%)
+                    - 🔵 Blue PoP% = High probability (>50%)
+                    - 🟡 Yellow Quality = Top-tier opportunity
+                    
+                    **Diversity Rules Applied:**
+                    - Top 1 option per ticker (prevents single symbol domination)
+                    - Single-name stocks only (ETFs have their own module: **📊 ETF Opts**)
+                    """)
+                    
+                else:
+                    progress_bar.empty()
+                    st.warning("No underpriced options found matching your criteria. Try adjusting filters:")
+                    st.markdown("""
+                    - Lower the Min Edge %
+                    - Increase Max Spread %
+                    - Lower the Min PoP %
+                    - Try a different DTE range
+                    """)
+        else:
+            st.info("🔍 **Configure your scan parameters above**, then click **Scan** to find underpriced options across 60+ liquid tickers.")
+            
+            st.markdown("""
+            ### How Option Hunter Works
+            
+            1. **Scans** 70+ highly liquid single-name stocks for options
+            2. **Filters** by liquidity (spread %, volume, open interest)  
+            3. **Calculates** theoretical value using Black-Scholes model
+            4. **Identifies** options trading below fair value (positive edge)
+            5. **Ranks** by Quality Score (edge + PoP + liquidity)
+            
+            **Best For:**
+            - Finding cheap convexity on individual stocks
+            - Directional plays with edge
+            - Identifying mispriced volatility
+            
+            💡 *For ETF options, use the **📊 ETF Opts** module*
+            """)
+
+    # ==========================================
+    # MODULE F: ET-EFFER HUNTER (ETF Scanner)
+    # ==========================================
+    elif mode == "📊 ETF Hunt":
+        st.title("📊 ET-effer Hunter: ETF Scanner")
+        st.caption("Scan top ETFs using the Ryan Model — momentum, squeeze, trap detection")
+        
+        with st.expander("🛠️ Scanner Settings", expanded=False):
+            sc1, sc2, sc3 = st.columns(3)
+            with sc1:
+                etf_scan_window = st.slider("Lookback Window", 10, 50, 20, key="etf_scan_window")
+            with sc2:
+                etf_sqz_thresh = st.slider("Squeeze Threshold", 0.10, 0.40, 0.25, key="etf_sqz_thresh")
+            with sc3:
+                etf_min_confidence = st.slider("Min Confidence %", 50, 95, 80, key="etf_min_conf")
+        
+        # Top 100 ETFs by Volume/AUM
+        ETF_TICKER_LIST = [
+            # Broad Market ETFs
+            "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "IVV", "VEA", "EFA", "VWO",
+            "IEMG", "VTV", "VUG", "IJH", "IJR", "VIG", "SCHD", "VYM", "ITOT", "IXUS",
+            # Sector ETFs
+            "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLU", "XLRE",
+            "XLC", "VGT", "VFH", "VHT", "VCR", "VDC", "VIS", "VAW", "VNQ", "VPU",
+            # Thematic / Industry
+            "ARKK", "ARKG", "ARKW", "ARKF", "SOXX", "SMH", "XBI", "IBB", "XHB", "XRT",
+            "KRE", "XOP", "OIH", "GDX", "GDXJ", "SLV", "GLD", "USO", "UNG", "JETS",
+            # Fixed Income
+            "TLT", "IEF", "SHY", "LQD", "HYG", "JNK", "BND", "AGG", "TIP", "MUB",
+            # Leveraged / Inverse (High Vol)
+            "TQQQ", "SQQQ", "SPXL", "SPXS", "UPRO", "SOXL", "SOXS", "LABU", "LABD", "FAS",
+            "FAZ", "ERX", "ERY", "NUGT", "DUST", "UVXY", "SVXY", "TNA", "TZA", "UDOW",
+            # International
+            "EWJ", "EWZ", "EWG", "EWU", "FXI", "MCHI", "INDA", "EWT", "EWY", "EWA",
+            # Commodity / Currency
+            "DBC", "PDBC", "GSG", "DBA", "UUP", "FXE", "FXY", "FXB",
+        ]
+        
+        @st.cache_data(ttl=600)
+        def etf_batch_process(tickers, scan_window, scan_sqz_thresh):
+            results = []
+            data_batch = yf.download(tickers + ["SPY"], period="6mo", progress=False)
+            
+            def get_series(df, symbol, col):
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        return df[col][symbol]
+                    else:
+                        return df[col]
+                except Exception:
+                    return None
+            
+            for symbol in tickers:
+                try:
+                    closes = get_series(data_batch, symbol, "Close")
+                    highs = get_series(data_batch, symbol, "High")
+                    lows = get_series(data_batch, symbol, "Low")
+                    spy_closes = get_series(data_batch, "SPY", "Close")
+                    
+                    if closes is None or len(closes.dropna()) < 60:
+                        continue
+                    
+                    closes = closes.dropna()
+                    highs = highs.dropna() if highs is not None else closes
+                    lows = lows.dropna() if lows is not None else closes
+                    spy_closes = spy_closes.dropna() if spy_closes is not None else closes
+                    
+                    # Ryan Model metrics
+                    sma = closes.rolling(window=scan_window).mean()
+                    std = closes.rolling(window=scan_window).std()
+                    upper = sma + (std * 2.0)
+                    lower = sma - (std * 2.0)
+                    bandwidth = (upper - lower) / sma
+                    
+                    current_price = closes.iloc[-1]
+                    current_bw = bandwidth.iloc[-1]
+                    is_squeeze = current_bw < scan_sqz_thresh
+                    
+                    squeeze_depth = 0
+                    if is_squeeze:
+                        squeeze_depth = (scan_sqz_thresh - current_bw) / scan_sqz_thresh
+                        squeeze_depth = min(max(squeeze_depth, 0), 1)
+                    
+                    trend_bias = "BULLISH" if current_price > sma.iloc[-1] else "BEARISH"
+                    
+                    ema_9 = closes.ewm(span=9, adjust=False).mean()
+                    ema_21 = closes.ewm(span=21, adjust=False).mean()
+                    ema_signal = "BULLISH" if ema_9.iloc[-1] > ema_21.iloc[-1] else "BEARISH"
+                    
+                    stock_pct = closes.pct_change(60).iloc[-1]
+                    spy_pct = spy_closes.pct_change(60).iloc[-1] if len(spy_closes) >= 60 else 0
+                    rs_ratio = stock_pct - spy_pct
+                    
+                    # Trap detection
+                    curr_high = highs.iloc[-1]
+                    curr_low = lows.iloc[-1]
+                    day_range = curr_high - curr_low
+                    
+                    if day_range == 0:
+                        range_position = 0.5
+                    else:
+                        range_position = (current_price - curr_low) / day_range
+                    
+                    if range_position > 0.8:
+                        intraday_health = "POWER"
+                    elif range_position < 0.2:
+                        intraday_health = "WEAK"
+                    elif range_position < 0.5 and trend_bias == "BULLISH":
+                        intraday_health = "FADING"
+                    else:
+                        intraday_health = "NEUTRAL"
+                    
+                    # Confidence calculation
+                    confidence = 0
+                    if trend_bias == "BULLISH" and ema_signal == "BULLISH":
+                        confidence += 35
+                    elif trend_bias == "BEARISH" and ema_signal == "BEARISH":
+                        confidence += 35
+                    else:
+                        confidence += 15
+                    
+                    if is_squeeze:
+                        confidence += 15 + (squeeze_depth * 10)
+                    
+                    if trend_bias == "BULLISH" and rs_ratio > 0:
+                        confidence += 20
+                    elif trend_bias == "BEARISH" and rs_ratio < 0:
+                        confidence += 20
+                    
+                    if intraday_health in ["FADING", "WEAK"]:
+                        confidence -= 15
+                    
+                    confidence = min(max(int(confidence), 0), 99)
+                    
+                    # Action signal
+                    action_signal = "WAIT"
+                    if confidence >= 80 and intraday_health == "POWER" and trend_bias == "BULLISH":
+                        action_signal = "✅ BUY"
+                    elif confidence >= 80 and intraday_health == "WEAK" and trend_bias == "BEARISH":
+                        action_signal = "🔻 SHORT"
+                    
+                    results.append({
+                        "Ticker": symbol,
+                        "Price": current_price,
+                        "Action": action_signal,
+                        "Trend": trend_bias,
+                        "Momentum": ema_signal,
+                        "Squeeze": "COILED" if is_squeeze else "LOOSE",
+                        "Bandwidth": current_bw,
+                        "Confidence": confidence,
+                        "RS_vs_SPY": rs_ratio,
+                        "Health": intraday_health,
+                    })
+                except Exception:
+                    continue
+            
+            return pd.DataFrame(results)
+        
+        if st.button("🚀 Scan ETF Universe", key="etf_hunter_btn"):
+            progress_bar = st.progress(0, text="Initializing ETF scan...")
+            
+            with st.spinner(f"Scanning {len(ETF_TICKER_LIST)} ETFs..."):
+                progress_bar.progress(30, text="Downloading ETF data...")
+                df_etf_results = etf_batch_process(ETF_TICKER_LIST, etf_scan_window, etf_sqz_thresh)
+                progress_bar.progress(90, text="Applying Ryan Model...")
+                
+                if df_etf_results is not None and not df_etf_results.empty:
+                    progress_bar.progress(100, text="Scan Complete.")
+                    progress_bar.empty()
+                    
+                    etf_longs = df_etf_results[
+                        (df_etf_results["Trend"] == "BULLISH") &
+                        (df_etf_results["Momentum"] == "BULLISH") &
+                        (df_etf_results["Squeeze"] == "COILED") &
+                        (df_etf_results["Confidence"] >= etf_min_confidence)
+                    ]
+                    
+                    etf_shorts = df_etf_results[
+                        (df_etf_results["Trend"] == "BEARISH") &
+                        (df_etf_results["Momentum"] == "BEARISH") &
+                        (df_etf_results["Squeeze"] == "COILED") &
+                        (df_etf_results["Confidence"] >= etf_min_confidence)
+                    ]
+                    
+                    # Long ETFs
+                    st.subheader(f"🟢 Long ETF Setups ({len(etf_longs)})")
+                    if not etf_longs.empty:
+                        st.dataframe(
+                            etf_longs.style.format({"Price": "${:.2f}", "Bandwidth": "{:.4f}", "RS_vs_SPY": "{:.2%}"})
+                            .background_gradient(subset=["Confidence"], cmap="Greens"),
+                            use_container_width=True,
+                            column_config={
+                                "Confidence": st.column_config.ProgressColumn("Confidence", format="%d%%", min_value=0, max_value=100)
+                            },
+                            column_order=("Ticker", "Action", "Confidence", "Health", "Price", "Trend", "Momentum", "Squeeze", "RS_vs_SPY"),
+                            hide_index=True
+                        )
+                    else:
+                        st.info(f"No Long ETF setups found (Conf > {etf_min_confidence}% + Coiled)")
+                    
+                    st.markdown("---")
+                    
+                    # Short ETFs
+                    st.subheader(f"🔴 Short ETF Setups ({len(etf_shorts)})")
+                    if not etf_shorts.empty:
+                        st.dataframe(
+                            etf_shorts.style.format({"Price": "${:.2f}", "Bandwidth": "{:.4f}", "RS_vs_SPY": "{:.2%}"})
+                            .background_gradient(subset=["Confidence"], cmap="Reds"),
+                            use_container_width=True,
+                            column_config={
+                                "Confidence": st.column_config.ProgressColumn("Confidence", format="%d%%", min_value=0, max_value=100)
+                            },
+                            column_order=("Ticker", "Action", "Confidence", "Health", "Price", "Trend", "Momentum", "Squeeze", "RS_vs_SPY"),
+                            hide_index=True
+                        )
+                    else:
+                        st.info(f"No Short ETF setups found (Conf > {etf_min_confidence}% + Coiled)")
+                    
+                    # Full results
+                    with st.expander("📂 View Full ETF Scan Results"):
+                        st.dataframe(
+                            df_etf_results.sort_values("Confidence", ascending=False)
+                            .style.format({"Price": "${:.2f}", "Confidence": "{:.0f}%"}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    
+                    st.markdown("---")
+                    st.markdown("""
+                    ### 🔑 ETF Hunter Key
+                    
+                    | Signal | Meaning |
+                    |--------|---------|
+                    | ✅ BUY | Conf ≥80% + POWER health + Bullish |
+                    | 🔻 SHORT | Conf ≥80% + WEAK health + Bearish |
+                    | WAIT | Setup forming but not actionable yet |
+                    
+                    **ETF Categories Scanned:** Broad Market, Sectors, Thematic, Fixed Income, Leveraged, International
+                    """)
+                else:
+                    progress_bar.empty()
+                    st.error("ETF scan returned no data. Check API connection.")
+        else:
+            st.info("📊 **Ready to scan 100+ ETFs** using the Ryan Model. Click to find momentum setups across sectors, themes, and asset classes.")
+
+    # ==========================================
+    # MODULE G: ET-EFFER OPTIONS (ETF Options Scanner)
+    # ==========================================
+    elif mode == "📊 ETF Opts":
+        st.title("📊 ET-effer Options: ETF Options Scanner")
+        st.caption("Find underpriced options on ETFs — sectors, themes, indices")
+        
+        st.markdown("### ⚙️ Scanner Configuration")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            etf_dte_range = st.selectbox("Days to Expiration", ["7-14 days", "14-30 days", "30-60 days", "60-90 days"], index=1, key="etf_dte")
+        with col2:
+            etf_direction = st.selectbox("Direction", ["Bullish (Calls)", "Bearish (Puts)", "Both"], key="etf_dir")
+        with col3:
+            etf_min_pop = st.slider("Min PoP %", 30, 80, 50, key="etf_pop")
+        with col4:
+            etf_max_spread = st.slider("Max Spread %", 5, 30, 15, key="etf_spread")
+        
+        col5, col6, col7, col8 = st.columns(4)
+        with col5:
+            etf_min_edge = st.slider("Min Edge %", 0, 30, 5, key="etf_edge")
+        with col6:
+            etf_max_otm = st.slider("Max OTM %", 5, 30, 15, key="etf_otm")
+        with col7:
+            etf_rf = st.number_input("Risk Free %", value=4.5, step=0.1, key="etf_rf")
+        with col8:
+            etf_max_results = st.selectbox("Top Results", [5, 10, 20, 50], index=1, key="etf_max")
+        
+        # Parse DTE
+        etf_dte_map = {
+            "7-14 days": (7, 14),
+            "14-30 days": (14, 30),
+            "30-60 days": (30, 60),
+            "60-90 days": (60, 90)
+        }
+        etf_min_dte, etf_max_dte = etf_dte_map[etf_dte_range]
+        
+        # ETF Options Universe (most liquid ETFs for options)
+        ETF_OPTIONS_LIST = [
+            # Index ETFs (highest options liquidity)
+            "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "EFA", "EEM",
+            # Sector ETFs
+            "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLY", "XLB", "XLU", "XLRE", "XLC",
+            # Industry ETFs
+            "SOXX", "SMH", "XBI", "IBB", "XHB", "XRT", "KRE", "XOP", "OIH", "GDX",
+            # Commodity ETFs
+            "GLD", "SLV", "USO", "UNG",
+            # Fixed Income
+            "TLT", "IEF", "HYG", "LQD", "JNK",
+            # Leveraged (High Vol = great for options)
+            "TQQQ", "SQQQ", "SOXL", "SOXS", "UVXY", "TNA", "TZA",
+            # Thematic
+            "ARKK", "ARKG", "JETS",
+            # International
+            "EWZ", "FXI", "EWJ", "MCHI",
+        ]
+        
+        @st.cache_data(ttl=300, show_spinner=False)
+        def scan_etf_options(tickers, min_dte, max_dte, direction, min_pop_thresh, max_spread, min_edge_pct, max_otm, rf):
+            """Scan ETFs for underpriced options"""
+            results = []
+            hydra_scan = HydraEngine()
+            
+            for ticker in tickers:
+                try:
+                    spot, _ = hydra_scan.get_spot(ticker)
+                    if spot is None or spot <= 0:
+                        continue
+                    
+                    exps = hydra_scan.get_expirations(ticker)
+                    if not exps:
+                        continue
+                    
+                    target_exp = None
+                    target_dte = None
+                    for exp in exps:
+                        try:
+                            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+                            dte = (exp_date - date.today()).days
+                            if min_dte <= dte <= max_dte:
+                                target_exp = exp
+                                target_dte = dte
+                                break
+                        except:
+                            continue
+                    
+                    if not target_exp:
+                        continue
+                    
+                    chain, _ = hydra_scan.get_chain(ticker, target_exp, spot)
+                    if chain is None or chain.empty:
+                        continue
+                    
+                    chain["spread"] = chain["ask"] - chain["bid"]
+                    chain["spread_pct"] = np.where(chain["bid"] > 0, (chain["spread"] / chain["bid"]) * 100, 100)
+                    
+                    if direction == "Bullish (Calls)":
+                        chain = chain[chain["type"] == "call"]
+                    elif direction == "Bearish (Puts)":
+                        chain = chain[chain["type"] == "put"]
+                    
+                    liquid_chain = chain[
+                        (chain["spread_pct"] <= max_spread) &
+                        (chain["bid"] > 0.05) &
+                        ((chain["volume"] >= 10) | (chain["openInterest"] >= 100))
+                    ].copy()
+                    
+                    if liquid_chain.empty:
+                        continue
+                    
+                    liquid_chain["otm_pct"] = np.where(
+                        liquid_chain["type"] == "call",
+                        ((liquid_chain["strike"] - spot) / spot) * 100,
+                        ((spot - liquid_chain["strike"]) / spot) * 100
+                    )
+                    
+                    liquid_chain = liquid_chain[(liquid_chain["otm_pct"] >= -5) & (liquid_chain["otm_pct"] <= max_otm)]
+                    
+                    if liquid_chain.empty:
+                        continue
+                    
+                    T = target_dte / 365.0
+                    
+                    for _, row in liquid_chain.iterrows():
+                        try:
+                            strike = row["strike"]
+                            opt_type = row["type"]
+                            iv = row.get("impliedVolatility", 0.3)
+                            if iv <= 0 or iv > 3:
+                                iv = 0.3
+                            
+                            kernel = PricingKernel(spot, strike, T, rf / 100, iv, opt_type)
+                            model_price = kernel.price_bsm()
+                            
+                            ask_price = row["ask"]
+                            edge = model_price - ask_price
+                            edge_pct = (edge / ask_price * 100) if ask_price > 0 else 0
+                            
+                            if edge_pct < min_edge_pct:
+                                continue
+                            
+                            greeks = kernel.get_greeks()
+                            delta = greeks.delta
+                            
+                            pop_raw = abs(delta)
+                            pop_adjusted = pop_raw * (1 - row["otm_pct"] / 100 * 0.5)
+                            pop_adjusted = max(0.05, min(0.95, pop_adjusted))
+                            
+                            if pop_adjusted * 100 < min_pop_thresh:
+                                continue
+                            
+                            quality = (edge_pct / 100) * 0.3 + pop_adjusted * 0.4 + (1 - row["spread_pct"] / max_spread) * 0.3
+                            
+                            results.append({
+                                "Ticker": ticker,
+                                "Type": opt_type.upper(),
+                                "Strike": strike,
+                                "DTE": target_dte,
+                                "Spot": spot,
+                                "OTM%": row["otm_pct"],
+                                "Ask": row["ask"],
+                                "Model": model_price,
+                                "Edge%": edge_pct,
+                                "PoP%": pop_adjusted * 100,
+                                "Delta": delta,
+                                "IV": iv * 100,
+                                "Spread%": row["spread_pct"],
+                                "Quality": quality
+                            })
+                        except:
+                            continue
+                except:
+                    continue
+            
+            return pd.DataFrame(results)
+        
+        if st.button("🚀 Scan ETF Options", type="primary", use_container_width=True, key="etf_opt_btn"):
+            progress_bar = st.progress(0, text="Initializing ETF options scan...")
+            
+            with st.spinner(f"Scanning {len(ETF_OPTIONS_LIST)} ETFs for mispriced options..."):
+                progress_bar.progress(20, text="Fetching options chains...")
+                
+                df_etf_opts = scan_etf_options(
+                    ETF_OPTIONS_LIST, etf_min_dte, etf_max_dte, etf_direction,
+                    etf_min_pop, etf_max_spread, etf_min_edge, etf_max_otm, etf_rf
+                )
+                
+                progress_bar.progress(90, text="Ranking opportunities...")
+                
+                if df_etf_opts is not None and not df_etf_opts.empty:
+                    progress_bar.progress(100, text="Scan complete!")
+                    progress_bar.empty()
+                    
+                    # Per-symbol best + global ranking
+                    df_etf_opts = df_etf_opts.sort_values("Quality", ascending=False)
+                    best_per_etf = df_etf_opts.groupby("Ticker").head(1)
+                    final_etf_results = best_per_etf.sort_values("Quality", ascending=False).head(etf_max_results)
+                    
+                    st.markdown("---")
+                    st.markdown("### 📊 ETF Options Scan Results")
+                    
+                    stat1, stat2, stat3, stat4 = st.columns(4)
+                    with stat1:
+                        st.metric("Top ETF Ideas", len(final_etf_results))
+                    with stat2:
+                        st.metric("Total Options Found", len(df_etf_opts))
+                    with stat3:
+                        avg_edge = final_etf_results["Edge%"].mean() if len(final_etf_results) > 0 else 0
+                        st.metric("Avg Edge %", f"{avg_edge:.1f}%")
+                    with stat4:
+                        avg_pop = final_etf_results["PoP%"].mean() if len(final_etf_results) > 0 else 0
+                        st.metric("Avg PoP %", f"{avg_pop:.1f}%")
+                    
+                    st.markdown("---")
+                    st.subheader(f"🎯 Top Underpriced ETF Options ({len(final_etf_results)} ETFs)")
+                    
+                    display_cols = ["Ticker", "Type", "Strike", "DTE", "Spot", "OTM%", "Ask", "Model", "Edge%", "PoP%", "Delta", "IV", "Quality"]
+                    
+                    st.dataframe(
+                        final_etf_results[display_cols].style.format({
+                            "Strike": "${:.2f}", "Spot": "${:.2f}", "OTM%": "{:.1f}%",
+                            "Ask": "${:.2f}", "Model": "${:.2f}", "Edge%": "{:.1f}%",
+                            "PoP%": "{:.1f}%", "Delta": "{:.2f}", "IV": "{:.1f}%", "Quality": "{:.2f}"
+                        }).background_gradient(subset=["Quality"], cmap="YlGn"),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Quality": st.column_config.ProgressColumn("Quality", format="%.2f", min_value=0, max_value=1)
+                        }
+                    )
+                    
+                    with st.expander("📋 Full ETF Options Results"):
+                        st.dataframe(
+                            df_etf_opts[display_cols].style.format({
+                                "Strike": "${:.2f}", "Spot": "${:.2f}", "OTM%": "{:.1f}%",
+                                "Ask": "${:.2f}", "Model": "${:.2f}", "Edge%": "{:.1f}%",
+                                "PoP%": "{:.1f}%", "Delta": "{:.2f}", "IV": "{:.1f}%", "Quality": "{:.2f}"
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    
+                    st.markdown("---")
+                    st.markdown("""
+                    ### 🔑 ETF Options Key
+                    
+                    | Column | Meaning |
+                    |--------|---------|
+                    | **Edge%** | (Model - Ask) / Ask — higher = more underpriced |
+                    | **PoP%** | Probability of Profit via delta proxy |
+                    | **Quality** | 30% edge + 40% PoP + 30% liquidity |
+                    
+                    **ETF Categories:** Index, Sector, Industry, Commodity, Fixed Income, Leveraged, Thematic
+                    """)
+                else:
+                    progress_bar.empty()
+                    st.warning("No underpriced ETF options found. Try adjusting filters.")
+        else:
+            st.info("📊 **Scan 50+ liquid ETFs** for underpriced options across indices, sectors, commodities, and leveraged products.")
+            
+            st.markdown("""
+            ### ETF Options Scanner
+            
+            Scans the most liquid ETFs for mispriced options:
+            - **Index ETFs:** SPY, QQQ, IWM, DIA
+            - **Sector ETFs:** XLF, XLK, XLE, XLV, etc.
+            - **Commodity:** GLD, SLV, USO
+            - **Fixed Income:** TLT, HYG, LQD
+            - **Leveraged:** TQQQ, SOXL, UVXY (high vol = cheap convexity)
+            
+            💡 *For single-name stock options, use the **🔍 Opt Hunt** module*
+            """)
 
 
 if __name__ == "__main__":
