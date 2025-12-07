@@ -1646,6 +1646,10 @@ def main():
                     # CAPITAL ALLOCATOR ENGINE: EV FORMULAS, PROBABILITY PROXIES, QUALITY SCORING
                     # ============================================================================
                     
+                    # Calculate time to expiration
+                    dt_struct = (datetime.strptime(sel_exp, "%Y-%m-%d").date() - date.today()).days
+                    T = max(dt_struct / 365.0, 0.001)  # Time in years
+                    
                     # Get ATM implied volatility from chain for probability calculations
                     atm_options = liquid_chain[liquid_chain["strike"] == atm_strike]
                     if not atm_options.empty:
