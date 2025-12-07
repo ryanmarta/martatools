@@ -1081,6 +1081,42 @@ def main():
                 if sigma is None or sigma <= 0:
                     sigma = mkt_iv
 
+                # Calculate IV Rank (52-week)
+                @st.cache_data(ttl=600, show_spinner=False)
+                def calc_iv_rank(ticker_sym, current_iv):
+                    try:
+                        # Get 1 year of historical data
+                        hist_data = yf.download(ticker_sym, period="1y", progress=False)
+                        if hist_data is None or hist_data.empty:
+                            return None, None, None
+                        
+                        if isinstance(hist_data.columns, pd.MultiIndex):
+                            hist_data = hist_data.droplevel(1, axis=1)
+                        
+                        # Calculate rolling 20-day realized volatility as IV proxy
+                        returns = np.log(hist_data["Close"] / hist_data["Close"].shift(1))
+                        rolling_vol = returns.rolling(20).std() * np.sqrt(252)
+                        rolling_vol = rolling_vol.dropna()
+                        
+                        if len(rolling_vol) < 20:
+                            return None, None, None
+                        
+                        iv_low = rolling_vol.min()
+                        iv_high = rolling_vol.max()
+                        
+                        # IV Rank = where current IV sits in 52-week range
+                        if iv_high > iv_low:
+                            iv_rank = (current_iv - iv_low) / (iv_high - iv_low)
+                            iv_rank = float(np.clip(iv_rank, 0, 1))
+                        else:
+                            iv_rank = 0.5
+                        
+                        return iv_rank, float(iv_low), float(iv_high)
+                    except Exception:
+                        return None, None, None
+
+                iv_rank, iv_52w_low, iv_52w_high = calc_iv_rank(ticker, mkt_iv)
+
                 dt = (datetime.strptime(sel_exp, "%Y-%m-%d").date() - date.today()).days
                 T = max(dt / 365.0, 0.001)
 
@@ -1136,6 +1172,24 @@ def main():
                 with c_res1:
                     cls = "signal-buy" if edge > 0 else "signal-sell"
                     sig = "LONG" if edge > 0 else "SHORT"
+                    
+                    # IV Rank color coding
+                    if iv_rank is not None:
+                        if iv_rank > 0.7:
+                            iv_color = "#EF4444"  # Red - high IV (good for selling)
+                            iv_label = "HIGH"
+                        elif iv_rank < 0.3:
+                            iv_color = "#10B981"  # Green - low IV (good for buying)
+                            iv_label = "LOW"
+                        else:
+                            iv_color = "#F59E0B"  # Yellow - mid IV
+                            iv_label = "MID"
+                        iv_display = f"{iv_rank:.0%}"
+                    else:
+                        iv_color = "#64748B"
+                        iv_label = "N/A"
+                        iv_display = "N/A"
+                    
                     st.markdown(
                         f"""
                     <div class="signal-box {cls}">
@@ -1148,6 +1202,21 @@ def main():
                     """,
                         unsafe_allow_html=True,
                     )
+                    
+                    # IV Rank Display
+                    st.markdown(
+                        f"""
+                    <div style="background: linear-gradient(135deg, {iv_color}15, {iv_color}30); 
+                                padding: 16px; border-radius: 12px; border: 1px solid {iv_color}40; margin-top: 12px;">
+                        <div style="font-size: 0.75rem; color: #64748B; text-transform: uppercase;">IV Rank (52-Week)</div>
+                        <div style="font-size: 1.8rem; font-weight: 700; color: {iv_color};">{iv_display} <span style="font-size: 0.9rem;">{iv_label}</span></div>
+                        <div style="font-size: 0.7rem; color: #94A3B8; margin-top: 4px;">
+                            Range: {iv_52w_low:.1%} - {iv_52w_high:.1%} | Current: {mkt_iv:.1%}
+                        </div>
+                    </div>
+                    """,
+                        unsafe_allow_html=True,
+                    ) if iv_rank is not None else st.info("IV Rank unavailable")
 
                 with c_res2:
                     df = pd.DataFrame(
@@ -1342,13 +1411,509 @@ def main():
                 st.error(f"Error: {e}")
 
         st.markdown("---")
+        st.subheader("📈 Volatility Skew & Mispricing Heatmap")
+        
+        # Enhanced skew chart with mispricing visualization
         fig_s = go.Figure()
-        fig_s.add_trace(go.Scatter(x=chain["strike"], y=chain["impliedVolatility"], mode="markers", name="Market"))
+        
+        # Prepare data for visualization
+        calls_data = chain[chain["type"] == "call"].copy()
+        puts_data = chain[chain["type"] == "put"].copy()
+        
+        # Calculate edge for color coding
+        if "edge" in chain.columns:
+            # Normalize edge for color intensity
+            max_edge = max(abs(chain["edge"].max()), abs(chain["edge"].min()), 0.01)
+            
+            # Add calls with edge coloring
+            if not calls_data.empty:
+                calls_colors = ['rgb(16, 185, 129)' if e > 0 else 'rgb(239, 68, 68)' for e in calls_data["edge"]]
+                calls_sizes = [8 + abs(e) / max_edge * 20 for e in calls_data["edge"]]
+                
+                fig_s.add_trace(go.Scatter(
+                    x=calls_data["strike"],
+                    y=calls_data["impliedVolatility"],
+                    mode="markers",
+                    name="Calls",
+                    marker=dict(
+                        size=calls_sizes,
+                        color=calls_data["edge"],
+                        colorscale=[[0, 'rgb(239, 68, 68)'], [0.5, 'rgb(148, 163, 184)'], [1, 'rgb(16, 185, 129)']],
+                        cmin=-max_edge,
+                        cmax=max_edge,
+                        showscale=True,
+                        colorbar=dict(title="Edge $", x=1.02, len=0.5, y=0.75),
+                        line=dict(width=1, color='white')
+                    ),
+                    text=[f"Strike: ${s:.0f}<br>IV: {iv:.1%}<br>Edge: ${e:.2f}<br>Vol: {v:,.0f}" 
+                          for s, iv, e, v in zip(calls_data["strike"], calls_data["impliedVolatility"], 
+                                                  calls_data["edge"], calls_data["volume"])],
+                    hoverinfo="text"
+                ))
+            
+            # Add puts with edge coloring
+            if not puts_data.empty:
+                puts_sizes = [8 + abs(e) / max_edge * 20 for e in puts_data["edge"]]
+                
+                fig_s.add_trace(go.Scatter(
+                    x=puts_data["strike"],
+                    y=puts_data["impliedVolatility"],
+                    mode="markers",
+                    name="Puts",
+                    marker=dict(
+                        size=puts_sizes,
+                        color=puts_data["edge"],
+                        colorscale=[[0, 'rgb(239, 68, 68)'], [0.5, 'rgb(148, 163, 184)'], [1, 'rgb(16, 185, 129)']],
+                        cmin=-max_edge,
+                        cmax=max_edge,
+                        symbol="diamond",
+                        line=dict(width=1, color='white')
+                    ),
+                    text=[f"Strike: ${s:.0f}<br>IV: {iv:.1%}<br>Edge: ${e:.2f}<br>Vol: {v:,.0f}" 
+                          for s, iv, e, v in zip(puts_data["strike"], puts_data["impliedVolatility"], 
+                                                  puts_data["edge"], puts_data["volume"])],
+                    hoverinfo="text"
+                ))
+        else:
+            # Fallback if no edge calculated
+            fig_s.add_trace(go.Scatter(
+                x=chain["strike"], 
+                y=chain["impliedVolatility"], 
+                mode="markers", 
+                name="Market IV",
+                marker=dict(size=10, color="#3B82F6")
+            ))
+        
+        # Add spline fit
         if surface.valid:
             xs = np.linspace(chain["strike"].min(), chain["strike"].max(), 100)
-            fig_s.add_trace(go.Scatter(x=xs, y=[surface.get_iv(x) for x in xs], mode="lines", name="Spline"))
-        fig_s.update_layout(template="plotly_white", height=400, title="Volatility Skew")
+            ys = [surface.get_iv(x) for x in xs]
+            fig_s.add_trace(go.Scatter(
+                x=xs, y=ys, 
+                mode="lines", 
+                name="Model Fit",
+                line=dict(color="#0F172A", width=2, dash="dash")
+            ))
+        
+        # Add spot price line
+        fig_s.add_vline(x=spot, line_dash="dot", line_color="#F59E0B", 
+                        annotation_text=f"Spot ${spot:.0f}", annotation_position="top")
+        
+        # Shade mispricing zones
+        if "edge" in chain.columns and surface.valid:
+            # Find best opportunities
+            best_calls = calls_data.nlargest(3, "edge") if not calls_data.empty else pd.DataFrame()
+            best_puts = puts_data.nlargest(3, "edge") if not puts_data.empty else pd.DataFrame()
+            
+            # Highlight zones with positive edge
+            for _, row in best_calls.iterrows():
+                if row["edge"] > 0.1:
+                    fig_s.add_vrect(
+                        x0=row["strike"] - 2, x1=row["strike"] + 2,
+                        fillcolor="rgba(16, 185, 129, 0.15)",
+                        line_width=0,
+                        annotation_text=f"+${row['edge']:.2f}",
+                        annotation_position="top left"
+                    )
+            
+            for _, row in best_puts.iterrows():
+                if row["edge"] > 0.1:
+                    fig_s.add_vrect(
+                        x0=row["strike"] - 2, x1=row["strike"] + 2,
+                        fillcolor="rgba(16, 185, 129, 0.15)",
+                        line_width=0
+                    )
+        
+        fig_s.update_layout(
+            template="plotly_white", 
+            height=500,
+            title=dict(
+                text="<b>Volatility Skew</b> — Hover for details | Size = Edge magnitude | Green = Underpriced | Red = Overpriced",
+                font=dict(size=14)
+            ),
+            xaxis_title="Strike Price",
+            yaxis_title="Implied Volatility",
+            yaxis_tickformat=".0%",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="closest"
+        )
+        
         st.plotly_chart(fig_s, use_container_width=True)
+        
+        # Summary stats
+        if "edge" in chain.columns:
+            col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
+            
+            pos_edge = chain[chain["edge"] > 0]
+            neg_edge = chain[chain["edge"] < 0]
+            
+            with col_stats1:
+                st.metric("Underpriced Options", len(pos_edge), help="Options trading below model fair value")
+            with col_stats2:
+                st.metric("Overpriced Options", len(neg_edge), help="Options trading above model fair value")
+            with col_stats3:
+                avg_call_iv = calls_data["impliedVolatility"].mean() if not calls_data.empty else 0
+                avg_put_iv = puts_data["impliedVolatility"].mean() if not puts_data.empty else 0
+                skew_val = avg_put_iv - avg_call_iv
+                st.metric("Put-Call Skew", f"{skew_val:.1%}", 
+                         delta="Puts richer" if skew_val > 0 else "Calls richer",
+                         delta_color="inverse" if skew_val > 0.02 else "normal")
+            with col_stats4:
+                best_edge = chain["edge"].max()
+                best_strike = chain.loc[chain["edge"].idxmax(), "strike"] if best_edge > 0 else "N/A"
+                st.metric("Best Opportunity", f"${best_edge:.2f}", delta=f"@ ${best_strike}" if best_edge > 0 else None)
+
+        # ==========================================
+        # OPTIONS STRUCTURING ENGINE
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🏗️ Options Structuring Engine")
+        st.caption("AI-powered leg selection for multi-leg strategies")
+        
+        with st.expander("⚙️ Strategy Builder", expanded=False):
+            str_col1, str_col2, str_col3 = st.columns(3)
+            
+            with str_col1:
+                strategy_type = st.selectbox("Strategy Type", [
+                    "Long Call", "Long Put",
+                    "Bull Call Spread", "Bear Put Spread",
+                    "Bull Put Spread (Credit)", "Bear Call Spread (Credit)",
+                    "Long Straddle", "Long Strangle",
+                    "Iron Condor", "Iron Butterfly"
+                ])
+            
+            with str_col2:
+                direction = st.selectbox("Market View", ["Bullish", "Bearish", "Neutral", "High Volatility", "Low Volatility"])
+            
+            with str_col3:
+                max_risk = st.number_input("Max Risk ($)", value=500, min_value=100, step=100)
+            
+            min_pop = st.slider("Minimum Probability of Profit", 0.3, 0.8, 0.5)
+            
+            if st.button("🔍 Find Optimal Structure", type="primary"):
+                with st.spinner("Analyzing option chain for optimal legs..."):
+                    
+                    # Get ATM strike
+                    atm_strike = min(chain["strike"].unique(), key=lambda x: abs(x - spot))
+                    
+                    # Filter for liquidity
+                    liquid_chain = chain[(chain["volume"] > 10) | (chain["openInterest"] > 100)].copy()
+                    if liquid_chain.empty:
+                        liquid_chain = chain.copy()
+                    
+                    calls = liquid_chain[liquid_chain["type"] == "call"].sort_values("strike")
+                    puts = liquid_chain[liquid_chain["type"] == "put"].sort_values("strike")
+                    
+                    recommendation = None
+                    legs = []
+                    rationale = ""
+                    risk_profile = ""
+                    
+                    # ============ SINGLE LEG STRATEGIES ============
+                    if strategy_type == "Long Call":
+                        # Find best call with positive edge, reasonable delta
+                        candidates = calls[(calls["strike"] >= spot * 0.95) & (calls["strike"] <= spot * 1.15)]
+                        if not candidates.empty and "edge" in candidates.columns:
+                            # Score by edge and delta balance
+                            candidates = candidates.copy()
+                            candidates["score"] = candidates["edge"] * 0.6 + (1 - abs(candidates["impliedVolatility"] - 0.3)) * 0.4
+                            best = candidates.loc[candidates["score"].idxmax()]
+                            
+                            legs = [{
+                                "type": "CALL", "strike": best["strike"], "direction": "LONG",
+                                "price": best["mid"], "iv": best["impliedVolatility"], "edge": best["edge"]
+                            }]
+                            rationale = f"Selected strike ${best['strike']:.0f} with ${best['edge']:.2f} edge. IV: {best['impliedVolatility']:.1%}"
+                            risk_profile = f"Max Loss: ${best['mid']*100:.0f} | Breakeven: ${best['strike'] + best['mid']:.2f}"
+                    
+                    elif strategy_type == "Long Put":
+                        candidates = puts[(puts["strike"] >= spot * 0.85) & (puts["strike"] <= spot * 1.05)]
+                        if not candidates.empty and "edge" in candidates.columns:
+                            candidates = candidates.copy()
+                            candidates["score"] = candidates["edge"] * 0.6 + (1 - abs(candidates["impliedVolatility"] - 0.3)) * 0.4
+                            best = candidates.loc[candidates["score"].idxmax()]
+                            
+                            legs = [{
+                                "type": "PUT", "strike": best["strike"], "direction": "LONG",
+                                "price": best["mid"], "iv": best["impliedVolatility"], "edge": best["edge"]
+                            }]
+                            rationale = f"Selected strike ${best['strike']:.0f} with ${best['edge']:.2f} edge. IV: {best['impliedVolatility']:.1%}"
+                            risk_profile = f"Max Loss: ${best['mid']*100:.0f} | Breakeven: ${best['strike'] - best['mid']:.2f}"
+                    
+                    # ============ VERTICAL SPREADS ============
+                    elif strategy_type == "Bull Call Spread":
+                        # Buy lower strike call, sell higher strike call
+                        best_spread = None
+                        best_score = -999
+                        
+                        for _, long_call in calls[calls["strike"] <= spot * 1.05].iterrows():
+                            for _, short_call in calls[calls["strike"] > long_call["strike"]].iterrows():
+                                if short_call["strike"] - long_call["strike"] > spot * 0.20:
+                                    continue  # Too wide
+                                
+                                net_debit = long_call["mid"] - short_call["mid"]
+                                max_profit = (short_call["strike"] - long_call["strike"]) - net_debit
+                                max_loss = net_debit
+                                
+                                if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                
+                                rr_ratio = max_profit / max_loss
+                                edge = long_call.get("edge", 0) - short_call.get("edge", 0)
+                                score = rr_ratio * 0.4 + edge * 0.6
+                                
+                                if score > best_score and max_loss * 100 <= max_risk:
+                                    best_score = score
+                                    best_spread = {
+                                        "long": long_call, "short": short_call,
+                                        "debit": net_debit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "rr": rr_ratio, "edge": edge
+                                    }
+                        
+                        if best_spread:
+                            legs = [
+                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]},
+                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]}
+                            ]
+                            rationale = f"Debit: ${best_spread['debit']:.2f} | R:R = {best_spread['rr']:.1f}:1 | Edge: ${best_spread['edge']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | Breakeven: ${best_spread['long']['strike'] + best_spread['debit']:.2f}"
+                    
+                    elif strategy_type in ["Bear Put Spread"]:
+                        best_spread = None
+                        best_score = -999
+                        
+                        for _, long_put in puts[puts["strike"] >= spot * 0.95].iterrows():
+                            for _, short_put in puts[puts["strike"] < long_put["strike"]].iterrows():
+                                if long_put["strike"] - short_put["strike"] > spot * 0.20:
+                                    continue
+                                
+                                net_debit = long_put["mid"] - short_put["mid"]
+                                max_profit = (long_put["strike"] - short_put["strike"]) - net_debit
+                                max_loss = net_debit
+                                
+                                if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                
+                                rr_ratio = max_profit / max_loss
+                                edge = long_put.get("edge", 0) - short_put.get("edge", 0)
+                                score = rr_ratio * 0.4 + edge * 0.6
+                                
+                                if score > best_score and max_loss * 100 <= max_risk:
+                                    best_score = score
+                                    best_spread = {
+                                        "long": long_put, "short": short_put,
+                                        "debit": net_debit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "rr": rr_ratio, "edge": edge
+                                    }
+                        
+                        if best_spread:
+                            legs = [
+                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]},
+                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]}
+                            ]
+                            rationale = f"Debit: ${best_spread['debit']:.2f} | R:R = {best_spread['rr']:.1f}:1 | Edge: ${best_spread['edge']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                    
+                    # ============ CREDIT SPREADS ============
+                    elif strategy_type == "Bull Put Spread (Credit)":
+                        best_spread = None
+                        best_score = -999
+                        
+                        for _, short_put in puts[puts["strike"] <= spot * 0.95].iterrows():
+                            for _, long_put in puts[puts["strike"] < short_put["strike"]].iterrows():
+                                if short_put["strike"] - long_put["strike"] > spot * 0.15:
+                                    continue
+                                
+                                net_credit = short_put["mid"] - long_put["mid"]
+                                width = short_put["strike"] - long_put["strike"]
+                                max_loss = width - net_credit
+                                max_profit = net_credit
+                                
+                                if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                
+                                pop_est = 1 - (spot - short_put["strike"]) / spot  # Simplified PoP
+                                pop_est = min(max(pop_est, 0.3), 0.9)
+                                
+                                if pop_est < min_pop:
+                                    continue
+                                
+                                score = (max_profit / max_loss) * pop_est
+                                
+                                if score > best_score and max_loss * 100 <= max_risk:
+                                    best_score = score
+                                    best_spread = {
+                                        "short": short_put, "long": long_put,
+                                        "credit": net_credit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "pop": pop_est
+                                    }
+                        
+                        if best_spread:
+                            legs = [
+                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]},
+                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]}
+                            ]
+                            rationale = f"Credit: ${best_spread['credit']:.2f} | PoP: {best_spread['pop']:.0%} | Sell below support"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                    
+                    elif strategy_type == "Bear Call Spread (Credit)":
+                        best_spread = None
+                        best_score = -999
+                        
+                        for _, short_call in calls[calls["strike"] >= spot * 1.05].iterrows():
+                            for _, long_call in calls[calls["strike"] > short_call["strike"]].iterrows():
+                                if long_call["strike"] - short_call["strike"] > spot * 0.15:
+                                    continue
+                                
+                                net_credit = short_call["mid"] - long_call["mid"]
+                                width = long_call["strike"] - short_call["strike"]
+                                max_loss = width - net_credit
+                                max_profit = net_credit
+                                
+                                if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                
+                                pop_est = 1 - (short_call["strike"] - spot) / spot
+                                pop_est = min(max(pop_est, 0.3), 0.9)
+                                
+                                if pop_est < min_pop:
+                                    continue
+                                
+                                score = (max_profit / max_loss) * pop_est
+                                
+                                if score > best_score and max_loss * 100 <= max_risk:
+                                    best_score = score
+                                    best_spread = {
+                                        "short": short_call, "long": long_call,
+                                        "credit": net_credit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "pop": pop_est
+                                    }
+                        
+                        if best_spread:
+                            legs = [
+                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]},
+                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]}
+                            ]
+                            rationale = f"Credit: ${best_spread['credit']:.2f} | PoP: {best_spread['pop']:.0%} | Sell above resistance"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                    
+                    # ============ VOLATILITY STRATEGIES ============
+                    elif strategy_type == "Long Straddle":
+                        atm_call = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
+                        atm_put = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
+                        
+                        if not atm_call.empty and not atm_put.empty:
+                            c = atm_call.iloc[0]
+                            p = atm_put.iloc[0]
+                            total_cost = c["mid"] + p["mid"]
+                            breakeven_up = c["strike"] + total_cost
+                            breakeven_down = p["strike"] - total_cost
+                            
+                            legs = [
+                                {"type": "CALL", "strike": c["strike"], "direction": "LONG", "price": c["mid"]},
+                                {"type": "PUT", "strike": p["strike"], "direction": "LONG", "price": p["mid"]}
+                            ]
+                            rationale = f"Total Cost: ${total_cost:.2f} | Need ±{total_cost/spot:.1%} move to profit"
+                            risk_profile = f"Max Loss: ${total_cost*100:.0f} | Breakevens: ${breakeven_down:.2f} / ${breakeven_up:.2f}"
+                    
+                    elif strategy_type == "Long Strangle":
+                        otm_calls = calls[calls["strike"] > spot * 1.03]
+                        otm_puts = puts[puts["strike"] < spot * 0.97]
+                        
+                        if not otm_calls.empty and not otm_puts.empty:
+                            c = otm_calls.iloc[0]
+                            p = otm_puts.iloc[-1]
+                            total_cost = c["mid"] + p["mid"]
+                            
+                            legs = [
+                                {"type": "CALL", "strike": c["strike"], "direction": "LONG", "price": c["mid"]},
+                                {"type": "PUT", "strike": p["strike"], "direction": "LONG", "price": p["mid"]}
+                            ]
+                            rationale = f"Total Cost: ${total_cost:.2f} | Cheaper than straddle, wider breakevens"
+                            risk_profile = f"Max Loss: ${total_cost*100:.0f}"
+                    
+                    elif strategy_type == "Iron Condor":
+                        # Sell OTM put spread + sell OTM call spread
+                        put_short = puts[puts["strike"] < spot * 0.95].iloc[-1] if len(puts[puts["strike"] < spot * 0.95]) > 0 else None
+                        put_long = puts[puts["strike"] < spot * 0.90].iloc[-1] if len(puts[puts["strike"] < spot * 0.90]) > 0 else None
+                        call_short = calls[calls["strike"] > spot * 1.05].iloc[0] if len(calls[calls["strike"] > spot * 1.05]) > 0 else None
+                        call_long = calls[calls["strike"] > spot * 1.10].iloc[0] if len(calls[calls["strike"] > spot * 1.10]) > 0 else None
+                        
+                        if all([put_short is not None, put_long is not None, call_short is not None, call_long is not None]):
+                            put_credit = put_short["mid"] - put_long["mid"]
+                            call_credit = call_short["mid"] - call_long["mid"]
+                            total_credit = put_credit + call_credit
+                            width = max(put_short["strike"] - put_long["strike"], call_long["strike"] - call_short["strike"])
+                            max_loss = width - total_credit
+                            
+                            legs = [
+                                {"type": "PUT", "strike": put_long["strike"], "direction": "LONG", "price": put_long["mid"]},
+                                {"type": "PUT", "strike": put_short["strike"], "direction": "SHORT", "price": put_short["mid"]},
+                                {"type": "CALL", "strike": call_short["strike"], "direction": "SHORT", "price": call_short["mid"]},
+                                {"type": "CALL", "strike": call_long["strike"], "direction": "LONG", "price": call_long["mid"]}
+                            ]
+                            rationale = f"Total Credit: ${total_credit:.2f} | Profit if price stays between ${put_short['strike']:.0f}-${call_short['strike']:.0f}"
+                            risk_profile = f"Max Profit: ${total_credit*100:.0f} | Max Loss: ${max_loss*100:.0f}"
+                    
+                    elif strategy_type == "Iron Butterfly":
+                        atm = atm_strike
+                        atm_call = calls[calls["strike"] == atm].iloc[0] if len(calls[calls["strike"] == atm]) > 0 else None
+                        atm_put = puts[puts["strike"] == atm].iloc[0] if len(puts[puts["strike"] == atm]) > 0 else None
+                        otm_put = puts[puts["strike"] < atm].iloc[-1] if len(puts[puts["strike"] < atm]) > 0 else None
+                        otm_call = calls[calls["strike"] > atm].iloc[0] if len(calls[calls["strike"] > atm]) > 0 else None
+                        
+                        if all([atm_call is not None, atm_put is not None, otm_put is not None, otm_call is not None]):
+                            credit = atm_call["mid"] + atm_put["mid"] - otm_put["mid"] - otm_call["mid"]
+                            
+                            legs = [
+                                {"type": "PUT", "strike": otm_put["strike"], "direction": "LONG", "price": otm_put["mid"]},
+                                {"type": "PUT", "strike": atm, "direction": "SHORT", "price": atm_put["mid"]},
+                                {"type": "CALL", "strike": atm, "direction": "SHORT", "price": atm_call["mid"]},
+                                {"type": "CALL", "strike": otm_call["strike"], "direction": "LONG", "price": otm_call["mid"]}
+                            ]
+                            rationale = f"Credit: ${credit:.2f} | Max profit if price pins at ${atm:.0f}"
+                            risk_profile = f"Max Profit: ${credit*100:.0f} at expiry if spot = ${atm:.0f}"
+                    
+                    # ============ DISPLAY RESULTS ============
+                    if legs:
+                        st.success("✅ Optimal Structure Found")
+                        
+                        # Trade Summary Card
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, #1E293B, #334155); color: white; padding: 20px; border-radius: 12px; margin: 16px 0;">
+                            <h3 style="margin: 0 0 12px 0; color: #10B981;">📋 {strategy_type}</h3>
+                            <p style="color: #94A3B8; margin: 0;">Underlying: <strong>{ticker}</strong> @ ${spot:.2f} | Expiry: {sel_exp}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Legs Table
+                        legs_df = pd.DataFrame(legs)
+                        st.markdown("**Trade Legs:**")
+                        st.dataframe(
+                            legs_df.style.format({"strike": "${:.0f}", "price": "${:.2f}"}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        # Rationale & Risk
+                        col_rat, col_risk = st.columns(2)
+                        with col_rat:
+                            st.markdown("**📊 Model Rationale:**")
+                            st.info(rationale)
+                        with col_risk:
+                            st.markdown("**⚠️ Risk Profile:**")
+                            st.warning(risk_profile)
+                        
+                        # Caveats
+                        st.markdown("**🔍 Key Caveats:**")
+                        st.caption("""
+                        • Slippage may reduce edge on wide bid-ask spreads
+                        • IV changes can significantly impact P/L before expiry
+                        • Early assignment risk on short American-style options
+                        • Model edge assumes no major news/catalysts
+                        """)
+                    else:
+                        st.warning("No viable structure found within risk parameters. Try adjusting max risk or min PoP.")
 
     # ==========================================
     # MODULE C: SNIPER (Single Stock Deep Dive)
