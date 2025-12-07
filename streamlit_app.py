@@ -1204,19 +1204,22 @@ def main():
                     )
                     
                     # IV Rank Display
-                    st.markdown(
-                        f"""
-                    <div style="background: linear-gradient(135deg, {iv_color}15, {iv_color}30); 
-                                padding: 16px; border-radius: 12px; border: 1px solid {iv_color}40; margin-top: 12px;">
-                        <div style="font-size: 0.75rem; color: #64748B; text-transform: uppercase;">IV Rank (52-Week)</div>
-                        <div style="font-size: 1.8rem; font-weight: 700; color: {iv_color};">{iv_display} <span style="font-size: 0.9rem;">{iv_label}</span></div>
-                        <div style="font-size: 0.7rem; color: #94A3B8; margin-top: 4px;">
-                            Range: {iv_52w_low:.1%} - {iv_52w_high:.1%} | Current: {mkt_iv:.1%}
+                    if iv_rank is not None and iv_52w_low is not None and iv_52w_high is not None:
+                        st.markdown(
+                            f"""
+                        <div style="background: linear-gradient(135deg, {iv_color}15, {iv_color}30); 
+                                    padding: 16px; border-radius: 12px; border: 1px solid {iv_color}40; margin-top: 12px;">
+                            <div style="font-size: 0.75rem; color: #64748B; text-transform: uppercase;">IV Rank (52-Week)</div>
+                            <div style="font-size: 1.8rem; font-weight: 700; color: {iv_color};">{iv_display} <span style="font-size: 0.9rem;">{iv_label}</span></div>
+                            <div style="font-size: 0.7rem; color: #94A3B8; margin-top: 4px;">
+                                Range: {iv_52w_low:.1%} - {iv_52w_high:.1%} | Current: {mkt_iv:.1%}
+                            </div>
                         </div>
-                    </div>
-                    """,
-                        unsafe_allow_html=True,
-                    ) if iv_rank is not None else st.info("IV Rank unavailable")
+                        """,
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.info("IV Rank data unavailable")
 
                 with c_res2:
                     df = pd.DataFrame(
@@ -1564,11 +1567,11 @@ def main():
                 st.metric("Best Opportunity", f"${best_edge:.2f}", delta=f"@ ${best_strike}" if best_edge > 0 else None)
 
         # ==========================================
-        # OPTIONS STRUCTURING ENGINE
+        # OPTIONS STRUCTURING ENGINE (Execution-Reality Aware)
         # ==========================================
         st.markdown("---")
         st.subheader("🏗️ Options Structuring Engine")
-        st.caption("AI-powered leg selection for multi-leg strategies")
+        st.caption("Execution-adjusted pricing • Liquidity-filtered • Slippage-aware")
         
         with st.expander("⚙️ Strategy Builder", expanded=False):
             str_col1, str_col2, str_col3 = st.columns(3)
@@ -1588,97 +1591,175 @@ def main():
             with str_col3:
                 max_risk = st.number_input("Max Risk ($)", value=500, min_value=100, step=100)
             
-            min_pop = st.slider("Minimum Probability of Profit", 0.3, 0.8, 0.5)
+            # Liquidity & Execution Settings
+            liq_col1, liq_col2 = st.columns(2)
+            with liq_col1:
+                min_pop = st.slider("Minimum Probability of Profit", 0.3, 0.8, 0.5)
+            with liq_col2:
+                max_spread_pct = st.slider("Max Bid-Ask Spread %", 0.05, 0.30, 0.15, help="Reject options with wider spreads")
             
-            if st.button("🔍 Find Optimal Structure", type="primary"):
-                with st.spinner("Analyzing option chain for optimal legs..."):
+            if st.button("🔍 Find Executable Structure", type="primary"):
+                with st.spinner("Filtering for liquid, executable trades..."):
                     
                     # Get ATM strike
                     atm_strike = min(chain["strike"].unique(), key=lambda x: abs(x - spot))
                     
-                    # Filter for liquidity
-                    liquid_chain = chain[(chain["volume"] > 10) | (chain["openInterest"] > 100)].copy()
+                    # ============ EXECUTION REALITY FILTERS ============
+                    # Calculate bid-ask spread percentage for each option
+                    exec_chain = chain.copy()
+                    exec_chain["spread"] = exec_chain["ask"] - exec_chain["bid"]
+                    exec_chain["spread_pct"] = exec_chain["spread"] / exec_chain["mid"].replace(0, np.nan)
+                    exec_chain["spread_pct"] = exec_chain["spread_pct"].fillna(1.0)
+                    
+                    # HARD LIQUIDITY GATE: Reject illiquid options
+                    liquid_chain = exec_chain[
+                        (exec_chain["spread_pct"] <= max_spread_pct) &  # Spread filter
+                        ((exec_chain["volume"] >= 5) | (exec_chain["openInterest"] >= 50)) &  # Activity filter
+                        (exec_chain["bid"] > 0.01)  # Must have real bid
+                    ].copy()
+                    
                     if liquid_chain.empty:
-                        liquid_chain = chain.copy()
+                        st.error("❌ No liquid options found. All contracts fail execution filters (wide spreads or no volume).")
+                        st.info("Try: Different expiration, closer to ATM strikes, or relax spread threshold.")
+                        st.stop()
+                    
+                    # Execution-adjusted pricing: LONG = ASK, SHORT = BID
+                    liquid_chain["exec_buy"] = liquid_chain["ask"]  # Price to buy (long)
+                    liquid_chain["exec_sell"] = liquid_chain["bid"]  # Price to sell (short)
+                    liquid_chain["slippage"] = liquid_chain["spread"] / 2  # Half-spread slippage estimate
                     
                     calls = liquid_chain[liquid_chain["type"] == "call"].sort_values("strike")
                     puts = liquid_chain[liquid_chain["type"] == "put"].sort_values("strike")
+                    
+                    # Track rejection reasons
+                    rejection_reasons = []
                     
                     recommendation = None
                     legs = []
                     rationale = ""
                     risk_profile = ""
+                    exec_warning = ""
+                    trade_viable = False
                     
-                    # ============ SINGLE LEG STRATEGIES ============
+                    # ============ SINGLE LEG STRATEGIES (Execution-Adjusted) ============
                     if strategy_type == "Long Call":
-                        # Find best call with positive edge, reasonable delta
                         candidates = calls[(calls["strike"] >= spot * 0.95) & (calls["strike"] <= spot * 1.15)]
                         if not candidates.empty and "edge" in candidates.columns:
-                            # Score by edge and delta balance
                             candidates = candidates.copy()
-                            candidates["score"] = candidates["edge"] * 0.6 + (1 - abs(candidates["impliedVolatility"] - 0.3)) * 0.4
-                            best = candidates.loc[candidates["score"].idxmax()]
+                            # Execution-adjusted edge: Model fair - ASK (what you actually pay)
+                            candidates["exec_edge"] = candidates["fair"] - candidates["exec_buy"]
+                            candidates["exec_edge"] = candidates["exec_edge"].fillna(candidates["edge"] - candidates["slippage"])
                             
-                            legs = [{
-                                "type": "CALL", "strike": best["strike"], "direction": "LONG",
-                                "price": best["mid"], "iv": best["impliedVolatility"], "edge": best["edge"]
-                            }]
-                            rationale = f"Selected strike ${best['strike']:.0f} with ${best['edge']:.2f} edge. IV: {best['impliedVolatility']:.1%}"
-                            risk_profile = f"Max Loss: ${best['mid']*100:.0f} | Breakeven: ${best['strike'] + best['mid']:.2f}"
+                            # Only consider positive execution-adjusted edge
+                            viable = candidates[candidates["exec_edge"] > 0]
+                            
+                            if not viable.empty:
+                                # Score by execution-adjusted metrics
+                                viable = viable.copy()
+                                viable["score"] = viable["exec_edge"] * 0.7 + (1 - viable["spread_pct"]) * 0.3
+                                best = viable.loc[viable["score"].idxmax()]
+                                
+                                exec_cost = best["exec_buy"]
+                                legs = [{
+                                    "type": "CALL", "strike": best["strike"], "direction": "LONG",
+                                    "bid": best["bid"], "ask": best["ask"], "exec_price": exec_cost,
+                                    "iv": best["impliedVolatility"], "exec_edge": best["exec_edge"],
+                                    "spread_pct": best["spread_pct"]
+                                }]
+                                rationale = f"Strike ${best['strike']:.0f} | Exec Edge: ${best['exec_edge']:.2f} (after slippage) | Spread: {best['spread_pct']:.1%}"
+                                risk_profile = f"Max Loss: ${exec_cost*100:.0f} (ASK price) | Breakeven: ${best['strike'] + exec_cost:.2f}"
+                                trade_viable = True
+                            else:
+                                rejection_reasons.append("All calls have negative edge after execution costs")
                     
                     elif strategy_type == "Long Put":
                         candidates = puts[(puts["strike"] >= spot * 0.85) & (puts["strike"] <= spot * 1.05)]
                         if not candidates.empty and "edge" in candidates.columns:
                             candidates = candidates.copy()
-                            candidates["score"] = candidates["edge"] * 0.6 + (1 - abs(candidates["impliedVolatility"] - 0.3)) * 0.4
-                            best = candidates.loc[candidates["score"].idxmax()]
+                            candidates["exec_edge"] = candidates["fair"] - candidates["exec_buy"]
+                            candidates["exec_edge"] = candidates["exec_edge"].fillna(candidates["edge"] - candidates["slippage"])
                             
-                            legs = [{
-                                "type": "PUT", "strike": best["strike"], "direction": "LONG",
-                                "price": best["mid"], "iv": best["impliedVolatility"], "edge": best["edge"]
-                            }]
-                            rationale = f"Selected strike ${best['strike']:.0f} with ${best['edge']:.2f} edge. IV: {best['impliedVolatility']:.1%}"
-                            risk_profile = f"Max Loss: ${best['mid']*100:.0f} | Breakeven: ${best['strike'] - best['mid']:.2f}"
+                            viable = candidates[candidates["exec_edge"] > 0]
+                            
+                            if not viable.empty:
+                                viable = viable.copy()
+                                viable["score"] = viable["exec_edge"] * 0.7 + (1 - viable["spread_pct"]) * 0.3
+                                best = viable.loc[viable["score"].idxmax()]
+                                
+                                exec_cost = best["exec_buy"]
+                                legs = [{
+                                    "type": "PUT", "strike": best["strike"], "direction": "LONG",
+                                    "bid": best["bid"], "ask": best["ask"], "exec_price": exec_cost,
+                                    "iv": best["impliedVolatility"], "exec_edge": best["exec_edge"],
+                                    "spread_pct": best["spread_pct"]
+                                }]
+                                rationale = f"Strike ${best['strike']:.0f} | Exec Edge: ${best['exec_edge']:.2f} (after slippage) | Spread: {best['spread_pct']:.1%}"
+                                risk_profile = f"Max Loss: ${exec_cost*100:.0f} (ASK price) | Breakeven: ${best['strike'] - exec_cost:.2f}"
+                                trade_viable = True
+                            else:
+                                rejection_reasons.append("All puts have negative edge after execution costs")
                     
-                    # ============ VERTICAL SPREADS ============
+                    # ============ VERTICAL SPREADS (Execution-Adjusted) ============
                     elif strategy_type == "Bull Call Spread":
-                        # Buy lower strike call, sell higher strike call
                         best_spread = None
                         best_score = -999
                         
                         for _, long_call in calls[calls["strike"] <= spot * 1.05].iterrows():
                             for _, short_call in calls[calls["strike"] > long_call["strike"]].iterrows():
                                 if short_call["strike"] - long_call["strike"] > spot * 0.20:
-                                    continue  # Too wide
-                                
-                                net_debit = long_call["mid"] - short_call["mid"]
-                                max_profit = (short_call["strike"] - long_call["strike"]) - net_debit
-                                max_loss = net_debit
-                                
-                                if max_loss <= 0 or max_profit <= 0:
                                     continue
                                 
+                                # EXECUTION-ADJUSTED: Buy at ASK, Sell at BID
+                                exec_debit = long_call["exec_buy"] - short_call["exec_sell"]
+                                width = short_call["strike"] - long_call["strike"]
+                                max_profit = width - exec_debit
+                                max_loss = exec_debit
+                                
+                                # FALSE ASYMMETRY SUPPRESSION
+                                if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                if exec_debit < (long_call["slippage"] + short_call["slippage"]):
+                                    continue  # Debit smaller than slippage = pricing artifact
+                                
                                 rr_ratio = max_profit / max_loss
-                                edge = long_call.get("edge", 0) - short_call.get("edge", 0)
-                                score = rr_ratio * 0.4 + edge * 0.6
+                                
+                                # SUPPRESS UNREALISTIC R:R (>10:1 without high PoP is fake)
+                                if rr_ratio > 10:
+                                    continue  # False asymmetry
+                                
+                                # Execution-adjusted edge
+                                total_slippage = long_call["slippage"] + short_call["slippage"]
+                                exec_edge = long_call.get("edge", 0) - short_call.get("edge", 0) - total_slippage
+                                
+                                # REJECT if slippage exceeds edge
+                                if exec_edge <= 0:
+                                    continue
+                                
+                                # Probability-weighted score (not just R:R)
+                                score = exec_edge * 0.5 + (1 / (1 + rr_ratio)) * 0.2 + (1 - long_call["spread_pct"]) * 0.3
                                 
                                 if score > best_score and max_loss * 100 <= max_risk:
                                     best_score = score
                                     best_spread = {
                                         "long": long_call, "short": short_call,
-                                        "debit": net_debit, "max_profit": max_profit, "max_loss": max_loss,
-                                        "rr": rr_ratio, "edge": edge
+                                        "exec_debit": exec_debit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "rr": rr_ratio, "exec_edge": exec_edge, "slippage": total_slippage
                                     }
                         
                         if best_spread:
                             legs = [
-                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]},
-                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]}
+                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG", 
+                                 "bid": best_spread["long"]["bid"], "ask": best_spread["long"]["ask"], "exec_price": best_spread["long"]["exec_buy"]},
+                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT",
+                                 "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                             ]
-                            rationale = f"Debit: ${best_spread['debit']:.2f} | R:R = {best_spread['rr']:.1f}:1 | Edge: ${best_spread['edge']:.2f}"
-                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | Breakeven: ${best_spread['long']['strike'] + best_spread['debit']:.2f}"
+                            rationale = f"Exec Debit: ${best_spread['exec_debit']:.2f} | Exec Edge: ${best_spread['exec_edge']:.2f} | Slippage: ${best_spread['slippage']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | R:R: {best_spread['rr']:.1f}:1"
+                            trade_viable = True
+                        else:
+                            rejection_reasons.append("No bull call spreads with positive edge after execution costs")
                     
-                    elif strategy_type in ["Bear Put Spread"]:
+                    elif strategy_type == "Bear Put Spread":
                         best_spread = None
                         best_score = -999
                         
@@ -1687,34 +1768,52 @@ def main():
                                 if long_put["strike"] - short_put["strike"] > spot * 0.20:
                                     continue
                                 
-                                net_debit = long_put["mid"] - short_put["mid"]
-                                max_profit = (long_put["strike"] - short_put["strike"]) - net_debit
-                                max_loss = net_debit
+                                # EXECUTION-ADJUSTED: Buy at ASK, Sell at BID
+                                exec_debit = long_put["exec_buy"] - short_put["exec_sell"]
+                                width = long_put["strike"] - short_put["strike"]
+                                max_profit = width - exec_debit
+                                max_loss = exec_debit
                                 
+                                # FALSE ASYMMETRY SUPPRESSION
                                 if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                if exec_debit < (long_put["slippage"] + short_put["slippage"]):
                                     continue
                                 
                                 rr_ratio = max_profit / max_loss
-                                edge = long_put.get("edge", 0) - short_put.get("edge", 0)
-                                score = rr_ratio * 0.4 + edge * 0.6
+                                if rr_ratio > 10:
+                                    continue
+                                
+                                total_slippage = long_put["slippage"] + short_put["slippage"]
+                                exec_edge = long_put.get("edge", 0) - short_put.get("edge", 0) - total_slippage
+                                
+                                if exec_edge <= 0:
+                                    continue
+                                
+                                score = exec_edge * 0.5 + (1 / (1 + rr_ratio)) * 0.2 + (1 - long_put["spread_pct"]) * 0.3
                                 
                                 if score > best_score and max_loss * 100 <= max_risk:
                                     best_score = score
                                     best_spread = {
                                         "long": long_put, "short": short_put,
-                                        "debit": net_debit, "max_profit": max_profit, "max_loss": max_loss,
-                                        "rr": rr_ratio, "edge": edge
+                                        "exec_debit": exec_debit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "rr": rr_ratio, "exec_edge": exec_edge, "slippage": total_slippage
                                     }
                         
                         if best_spread:
                             legs = [
-                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]},
-                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]}
+                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG",
+                                 "bid": best_spread["long"]["bid"], "ask": best_spread["long"]["ask"], "exec_price": best_spread["long"]["exec_buy"]},
+                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT",
+                                 "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                             ]
-                            rationale = f"Debit: ${best_spread['debit']:.2f} | R:R = {best_spread['rr']:.1f}:1 | Edge: ${best_spread['edge']:.2f}"
-                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                            rationale = f"Exec Debit: ${best_spread['exec_debit']:.2f} | Exec Edge: ${best_spread['exec_edge']:.2f} | Slippage: ${best_spread['slippage']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | R:R: {best_spread['rr']:.1f}:1"
+                            trade_viable = True
+                        else:
+                            rejection_reasons.append("No bear put spreads with positive edge after execution costs")
                     
-                    # ============ CREDIT SPREADS ============
+                    # ============ CREDIT SPREADS (Execution-Adjusted) ============
                     elif strategy_type == "Bull Put Spread (Credit)":
                         best_spread = None
                         best_score = -999
@@ -1724,37 +1823,57 @@ def main():
                                 if short_put["strike"] - long_put["strike"] > spot * 0.15:
                                     continue
                                 
-                                net_credit = short_put["mid"] - long_put["mid"]
+                                # EXECUTION-ADJUSTED: Sell at BID, Buy at ASK
+                                exec_credit = short_put["exec_sell"] - long_put["exec_buy"]
                                 width = short_put["strike"] - long_put["strike"]
-                                max_loss = width - net_credit
-                                max_profit = net_credit
+                                max_loss = width - exec_credit
+                                max_profit = exec_credit
                                 
+                                # FALSE ASYMMETRY SUPPRESSION
                                 if max_loss <= 0 or max_profit <= 0:
                                     continue
+                                if exec_credit < (short_put["slippage"] + long_put["slippage"]):
+                                    continue  # Credit smaller than slippage = not fillable
                                 
-                                pop_est = 1 - (spot - short_put["strike"]) / spot  # Simplified PoP
+                                rr_ratio = max_profit / max_loss
+                                if rr_ratio > 10:
+                                    continue
+                                
+                                pop_est = 1 - (spot - short_put["strike"]) / spot
                                 pop_est = min(max(pop_est, 0.3), 0.9)
                                 
                                 if pop_est < min_pop:
                                     continue
                                 
-                                score = (max_profit / max_loss) * pop_est
+                                # Slippage-adjusted EV
+                                total_slippage = short_put["slippage"] + long_put["slippage"]
+                                exec_ev = (max_profit * pop_est) - (max_loss * (1 - pop_est)) - total_slippage
+                                
+                                if exec_ev <= 0:
+                                    continue  # Negative EV after slippage
+                                
+                                score = exec_ev * 0.6 + pop_est * 0.4
                                 
                                 if score > best_score and max_loss * 100 <= max_risk:
                                     best_score = score
                                     best_spread = {
                                         "short": short_put, "long": long_put,
-                                        "credit": net_credit, "max_profit": max_profit, "max_loss": max_loss,
-                                        "pop": pop_est
+                                        "exec_credit": exec_credit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "pop": pop_est, "exec_ev": exec_ev, "slippage": total_slippage
                                     }
                         
                         if best_spread:
                             legs = [
-                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]},
-                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]}
+                                {"type": "PUT", "strike": best_spread["short"]["strike"], "direction": "SHORT",
+                                 "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]},
+                                {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG",
+                                 "bid": best_spread["long"]["bid"], "ask": best_spread["long"]["ask"], "exec_price": best_spread["long"]["exec_buy"]}
                             ]
-                            rationale = f"Credit: ${best_spread['credit']:.2f} | PoP: {best_spread['pop']:.0%} | Sell below support"
-                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                            rationale = f"Exec Credit: ${best_spread['exec_credit']:.2f} | PoP: {best_spread['pop']:.0%} | Exec EV: ${best_spread['exec_ev']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | Slippage: ${best_spread['slippage']:.2f}"
+                            trade_viable = True
+                        else:
+                            rejection_reasons.append("No bull put spreads with positive EV after execution costs")
                     
                     elif strategy_type == "Bear Call Spread (Credit)":
                         best_spread = None
@@ -1765,12 +1884,20 @@ def main():
                                 if long_call["strike"] - short_call["strike"] > spot * 0.15:
                                     continue
                                 
-                                net_credit = short_call["mid"] - long_call["mid"]
+                                # EXECUTION-ADJUSTED: Sell at BID, Buy at ASK
+                                exec_credit = short_call["exec_sell"] - long_call["exec_buy"]
                                 width = long_call["strike"] - short_call["strike"]
-                                max_loss = width - net_credit
-                                max_profit = net_credit
+                                max_loss = width - exec_credit
+                                max_profit = exec_credit
                                 
+                                # FALSE ASYMMETRY SUPPRESSION
                                 if max_loss <= 0 or max_profit <= 0:
+                                    continue
+                                if exec_credit < (short_call["slippage"] + long_call["slippage"]):
+                                    continue
+                                
+                                rr_ratio = max_profit / max_loss
+                                if rr_ratio > 10:
                                     continue
                                 
                                 pop_est = 1 - (short_call["strike"] - spot) / spot
@@ -1779,25 +1906,37 @@ def main():
                                 if pop_est < min_pop:
                                     continue
                                 
-                                score = (max_profit / max_loss) * pop_est
+                                # Slippage-adjusted EV
+                                total_slippage = short_call["slippage"] + long_call["slippage"]
+                                exec_ev = (max_profit * pop_est) - (max_loss * (1 - pop_est)) - total_slippage
+                                
+                                if exec_ev <= 0:
+                                    continue
+                                
+                                score = exec_ev * 0.6 + pop_est * 0.4
                                 
                                 if score > best_score and max_loss * 100 <= max_risk:
                                     best_score = score
                                     best_spread = {
                                         "short": short_call, "long": long_call,
-                                        "credit": net_credit, "max_profit": max_profit, "max_loss": max_loss,
-                                        "pop": pop_est
+                                        "exec_credit": exec_credit, "max_profit": max_profit, "max_loss": max_loss,
+                                        "pop": pop_est, "exec_ev": exec_ev, "slippage": total_slippage
                                     }
                         
                         if best_spread:
                             legs = [
-                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT", "price": best_spread["short"]["mid"]},
-                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG", "price": best_spread["long"]["mid"]}
+                                {"type": "CALL", "strike": best_spread["short"]["strike"], "direction": "SHORT",
+                                 "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]},
+                                {"type": "CALL", "strike": best_spread["long"]["strike"], "direction": "LONG",
+                                 "bid": best_spread["long"]["bid"], "ask": best_spread["long"]["ask"], "exec_price": best_spread["long"]["exec_buy"]}
                             ]
-                            rationale = f"Credit: ${best_spread['credit']:.2f} | PoP: {best_spread['pop']:.0%} | Sell above resistance"
-                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f}"
+                            rationale = f"Exec Credit: ${best_spread['exec_credit']:.2f} | PoP: {best_spread['pop']:.0%} | Exec EV: ${best_spread['exec_ev']:.2f}"
+                            risk_profile = f"Max Profit: ${best_spread['max_profit']*100:.0f} | Max Loss: ${best_spread['max_loss']*100:.0f} | Slippage: ${best_spread['slippage']:.2f}"
+                            trade_viable = True
+                        else:
+                            rejection_reasons.append("No bear call spreads with positive EV after execution costs")
                     
-                    # ============ VOLATILITY STRATEGIES ============
+                    # ============ VOLATILITY STRATEGIES (Execution-Adjusted) ============
                     elif strategy_type == "Long Straddle":
                         atm_call = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
                         atm_put = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
@@ -1805,16 +1944,27 @@ def main():
                         if not atm_call.empty and not atm_put.empty:
                             c = atm_call.iloc[0]
                             p = atm_put.iloc[0]
-                            total_cost = c["mid"] + p["mid"]
-                            breakeven_up = c["strike"] + total_cost
-                            breakeven_down = p["strike"] - total_cost
                             
-                            legs = [
-                                {"type": "CALL", "strike": c["strike"], "direction": "LONG", "price": c["mid"]},
-                                {"type": "PUT", "strike": p["strike"], "direction": "LONG", "price": p["mid"]}
-                            ]
-                            rationale = f"Total Cost: ${total_cost:.2f} | Need ±{total_cost/spot:.1%} move to profit"
-                            risk_profile = f"Max Loss: ${total_cost*100:.0f} | Breakevens: ${breakeven_down:.2f} / ${breakeven_up:.2f}"
+                            # EXECUTION-ADJUSTED: Both legs are LONG = ASK
+                            exec_cost = c["exec_buy"] + p["exec_buy"]
+                            total_slippage = c["slippage"] + p["slippage"]
+                            breakeven_up = c["strike"] + exec_cost
+                            breakeven_down = p["strike"] - exec_cost
+                            move_needed = exec_cost / spot
+                            
+                            # FALSE ASYMMETRY: Reject if slippage is too high
+                            if total_slippage > exec_cost * 0.15:
+                                rejection_reasons.append(f"Straddle slippage too high: ${total_slippage:.2f} on ${exec_cost:.2f} cost")
+                            else:
+                                legs = [
+                                    {"type": "CALL", "strike": c["strike"], "direction": "LONG",
+                                     "bid": c["bid"], "ask": c["ask"], "exec_price": c["exec_buy"]},
+                                    {"type": "PUT", "strike": p["strike"], "direction": "LONG",
+                                     "bid": p["bid"], "ask": p["ask"], "exec_price": p["exec_buy"]}
+                                ]
+                                rationale = f"Exec Cost: ${exec_cost:.2f} (ASK) | Need ±{move_needed:.1%} move | Slippage: ${total_slippage:.2f}"
+                                risk_profile = f"Max Loss: ${exec_cost*100:.0f} | Breakevens: ${breakeven_down:.2f} / ${breakeven_up:.2f}"
+                                trade_viable = True
                     
                     elif strategy_type == "Long Strangle":
                         otm_calls = calls[calls["strike"] > spot * 1.03]
@@ -1823,14 +1973,23 @@ def main():
                         if not otm_calls.empty and not otm_puts.empty:
                             c = otm_calls.iloc[0]
                             p = otm_puts.iloc[-1]
-                            total_cost = c["mid"] + p["mid"]
                             
-                            legs = [
-                                {"type": "CALL", "strike": c["strike"], "direction": "LONG", "price": c["mid"]},
-                                {"type": "PUT", "strike": p["strike"], "direction": "LONG", "price": p["mid"]}
-                            ]
-                            rationale = f"Total Cost: ${total_cost:.2f} | Cheaper than straddle, wider breakevens"
-                            risk_profile = f"Max Loss: ${total_cost*100:.0f}"
+                            # EXECUTION-ADJUSTED: Both legs are LONG = ASK
+                            exec_cost = c["exec_buy"] + p["exec_buy"]
+                            total_slippage = c["slippage"] + p["slippage"]
+                            
+                            if total_slippage > exec_cost * 0.20:
+                                rejection_reasons.append(f"Strangle slippage too high: ${total_slippage:.2f} on ${exec_cost:.2f} cost")
+                            else:
+                                legs = [
+                                    {"type": "CALL", "strike": c["strike"], "direction": "LONG",
+                                     "bid": c["bid"], "ask": c["ask"], "exec_price": c["exec_buy"]},
+                                    {"type": "PUT", "strike": p["strike"], "direction": "LONG",
+                                     "bid": p["bid"], "ask": p["ask"], "exec_price": p["exec_buy"]}
+                                ]
+                                rationale = f"Exec Cost: ${exec_cost:.2f} (ASK) | Slippage: ${total_slippage:.2f} | Cheaper than straddle"
+                                risk_profile = f"Max Loss: ${exec_cost*100:.0f}"
+                                trade_viable = True
                     
                     elif strategy_type == "Iron Condor":
                         # Sell OTM put spread + sell OTM call spread
@@ -1840,20 +1999,33 @@ def main():
                         call_long = calls[calls["strike"] > spot * 1.10].iloc[0] if len(calls[calls["strike"] > spot * 1.10]) > 0 else None
                         
                         if all([put_short is not None, put_long is not None, call_short is not None, call_long is not None]):
-                            put_credit = put_short["mid"] - put_long["mid"]
-                            call_credit = call_short["mid"] - call_long["mid"]
-                            total_credit = put_credit + call_credit
+                            # EXECUTION-ADJUSTED: Short = BID, Long = ASK
+                            exec_credit = (put_short["exec_sell"] - put_long["exec_buy"]) + (call_short["exec_sell"] - call_long["exec_buy"])
+                            total_slippage = put_short["slippage"] + put_long["slippage"] + call_short["slippage"] + call_long["slippage"]
                             width = max(put_short["strike"] - put_long["strike"], call_long["strike"] - call_short["strike"])
-                            max_loss = width - total_credit
+                            max_loss = width - exec_credit
                             
-                            legs = [
-                                {"type": "PUT", "strike": put_long["strike"], "direction": "LONG", "price": put_long["mid"]},
-                                {"type": "PUT", "strike": put_short["strike"], "direction": "SHORT", "price": put_short["mid"]},
-                                {"type": "CALL", "strike": call_short["strike"], "direction": "SHORT", "price": call_short["mid"]},
-                                {"type": "CALL", "strike": call_long["strike"], "direction": "LONG", "price": call_long["mid"]}
-                            ]
-                            rationale = f"Total Credit: ${total_credit:.2f} | Profit if price stays between ${put_short['strike']:.0f}-${call_short['strike']:.0f}"
-                            risk_profile = f"Max Profit: ${total_credit*100:.0f} | Max Loss: ${max_loss*100:.0f}"
+                            # FALSE ASYMMETRY SUPPRESSION
+                            if exec_credit <= 0 or exec_credit < total_slippage:
+                                rejection_reasons.append(f"Iron Condor: Credit ${exec_credit:.2f} doesn't cover slippage ${total_slippage:.2f}")
+                            elif max_loss <= 0:
+                                rejection_reasons.append("Iron Condor: Invalid structure - negative max loss")
+                            else:
+                                legs = [
+                                    {"type": "PUT", "strike": put_long["strike"], "direction": "LONG",
+                                     "bid": put_long["bid"], "ask": put_long["ask"], "exec_price": put_long["exec_buy"]},
+                                    {"type": "PUT", "strike": put_short["strike"], "direction": "SHORT",
+                                     "bid": put_short["bid"], "ask": put_short["ask"], "exec_price": put_short["exec_sell"]},
+                                    {"type": "CALL", "strike": call_short["strike"], "direction": "SHORT",
+                                     "bid": call_short["bid"], "ask": call_short["ask"], "exec_price": call_short["exec_sell"]},
+                                    {"type": "CALL", "strike": call_long["strike"], "direction": "LONG",
+                                     "bid": call_long["bid"], "ask": call_long["ask"], "exec_price": call_long["exec_buy"]}
+                                ]
+                                rationale = f"Exec Credit: ${exec_credit:.2f} | Slippage: ${total_slippage:.2f} | Range: ${put_short['strike']:.0f}-${call_short['strike']:.0f}"
+                                risk_profile = f"Max Profit: ${exec_credit*100:.0f} | Max Loss: ${max_loss*100:.0f}"
+                                trade_viable = True
+                        else:
+                            rejection_reasons.append("Iron Condor: Not enough liquid strikes available")
                     
                     elif strategy_type == "Iron Butterfly":
                         atm = atm_strike
@@ -1863,34 +2035,58 @@ def main():
                         otm_call = calls[calls["strike"] > atm].iloc[0] if len(calls[calls["strike"] > atm]) > 0 else None
                         
                         if all([atm_call is not None, atm_put is not None, otm_put is not None, otm_call is not None]):
-                            credit = atm_call["mid"] + atm_put["mid"] - otm_put["mid"] - otm_call["mid"]
+                            # EXECUTION-ADJUSTED: Short ATMs at BID, Long wings at ASK
+                            exec_credit = (atm_call["exec_sell"] + atm_put["exec_sell"]) - (otm_put["exec_buy"] + otm_call["exec_buy"])
+                            total_slippage = atm_call["slippage"] + atm_put["slippage"] + otm_put["slippage"] + otm_call["slippage"]
                             
-                            legs = [
-                                {"type": "PUT", "strike": otm_put["strike"], "direction": "LONG", "price": otm_put["mid"]},
-                                {"type": "PUT", "strike": atm, "direction": "SHORT", "price": atm_put["mid"]},
-                                {"type": "CALL", "strike": atm, "direction": "SHORT", "price": atm_call["mid"]},
-                                {"type": "CALL", "strike": otm_call["strike"], "direction": "LONG", "price": otm_call["mid"]}
-                            ]
-                            rationale = f"Credit: ${credit:.2f} | Max profit if price pins at ${atm:.0f}"
-                            risk_profile = f"Max Profit: ${credit*100:.0f} at expiry if spot = ${atm:.0f}"
+                            if exec_credit <= 0 or exec_credit < total_slippage:
+                                rejection_reasons.append(f"Iron Butterfly: Credit ${exec_credit:.2f} doesn't cover slippage ${total_slippage:.2f}")
+                            else:
+                                legs = [
+                                    {"type": "PUT", "strike": otm_put["strike"], "direction": "LONG",
+                                     "bid": otm_put["bid"], "ask": otm_put["ask"], "exec_price": otm_put["exec_buy"]},
+                                    {"type": "PUT", "strike": atm, "direction": "SHORT",
+                                     "bid": atm_put["bid"], "ask": atm_put["ask"], "exec_price": atm_put["exec_sell"]},
+                                    {"type": "CALL", "strike": atm, "direction": "SHORT",
+                                     "bid": atm_call["bid"], "ask": atm_call["ask"], "exec_price": atm_call["exec_sell"]},
+                                    {"type": "CALL", "strike": otm_call["strike"], "direction": "LONG",
+                                     "bid": otm_call["bid"], "ask": otm_call["ask"], "exec_price": otm_call["exec_buy"]}
+                                ]
+                                rationale = f"Exec Credit: ${exec_credit:.2f} | Slippage: ${total_slippage:.2f} | Pin strike: ${atm:.0f}"
+                                risk_profile = f"Max Profit: ${exec_credit*100:.0f} at expiry if spot = ${atm:.0f}"
+                                trade_viable = True
+                        else:
+                            rejection_reasons.append("Iron Butterfly: Not enough liquid strikes available")
                     
-                    # ============ DISPLAY RESULTS ============
-                    if legs:
-                        st.success("✅ Optimal Structure Found")
+                    # ============ DISPLAY RESULTS (Execution-Reality Filtered) ============
+                    if legs and trade_viable:
+                        # PRESENTATION INTEGRITY: Only claim success if filters passed
+                        st.success("✅ Executable Structure Found (Liquidity & Slippage Verified)")
                         
                         # Trade Summary Card
                         st.markdown(f"""
                         <div style="background: linear-gradient(135deg, #1E293B, #334155); color: white; padding: 20px; border-radius: 12px; margin: 16px 0;">
                             <h3 style="margin: 0 0 12px 0; color: #10B981;">📋 {strategy_type}</h3>
                             <p style="color: #94A3B8; margin: 0;">Underlying: <strong>{ticker}</strong> @ ${spot:.2f} | Expiry: {sel_exp}</p>
+                            <p style="color: #60A5FA; font-size: 0.8rem; margin-top: 8px;">✓ Execution-adjusted pricing (ASK for longs, BID for shorts)</p>
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # Legs Table
+                        # Legs Table with EXECUTION PRICES
                         legs_df = pd.DataFrame(legs)
-                        st.markdown("**Trade Legs:**")
+                        st.markdown("**Trade Legs (Execution-Adjusted):**")
+                        
+                        # Format columns based on what's available
+                        format_dict = {"strike": "${:.0f}"}
+                        if "exec_price" in legs_df.columns:
+                            format_dict["exec_price"] = "${:.2f}"
+                        if "bid" in legs_df.columns:
+                            format_dict["bid"] = "${:.2f}"
+                        if "ask" in legs_df.columns:
+                            format_dict["ask"] = "${:.2f}"
+                        
                         st.dataframe(
-                            legs_df.style.format({"strike": "${:.0f}", "price": "${:.2f}"}),
+                            legs_df.style.format(format_dict),
                             use_container_width=True,
                             hide_index=True
                         )
@@ -1898,22 +2094,52 @@ def main():
                         # Rationale & Risk
                         col_rat, col_risk = st.columns(2)
                         with col_rat:
-                            st.markdown("**📊 Model Rationale:**")
+                            st.markdown("**📊 Execution Metrics:**")
                             st.info(rationale)
                         with col_risk:
                             st.markdown("**⚠️ Risk Profile:**")
                             st.warning(risk_profile)
                         
-                        # Caveats
-                        st.markdown("**🔍 Key Caveats:**")
+                        # Enhanced Caveats
+                        st.markdown("**🔍 Execution Caveats:**")
                         st.caption("""
-                        • Slippage may reduce edge on wide bid-ask spreads
+                        • Prices shown use ASK for buys, BID for sells (worst-case fills)
+                        • Actual fills may be better with limit orders at mid
                         • IV changes can significantly impact P/L before expiry
                         • Early assignment risk on short American-style options
-                        • Model edge assumes no major news/catalysts
+                        • Re-check bid-ask spreads before execution
+                        """)
+                    elif rejection_reasons:
+                        # PRESENTATION INTEGRITY: Explicit rejection with reasons
+                        st.error("❌ No actionable trade identified under current market conditions")
+                        
+                        st.markdown("""
+                        <div style="background: linear-gradient(135deg, #7F1D1D, #991B1B); color: white; padding: 16px; border-radius: 12px; margin: 12px 0;">
+                            <h4 style="margin: 0 0 8px 0; color: #FCA5A5;">🚫 Trade Rejected - Execution Reality Check Failed</h4>
+                            <p style="color: #FECACA; font-size: 0.85rem; margin: 0;">
+                                The system found structures that looked attractive on paper but failed execution filters.
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        st.markdown("**Rejection Reasons:**")
+                        for reason in rejection_reasons:
+                            st.caption(f"• {reason}")
+                        
+                        st.info("""
+                        **What this means:**
+                        - Bid-ask spreads are too wide to capture theoretical edge
+                        - Slippage would consume expected profit
+                        - Liquidity is insufficient for reliable fills
+                        
+                        **Try:**
+                        - Different expiration (front-month usually more liquid)
+                        - Closer to ATM strikes
+                        - Relax the spread threshold slider
+                        - Wait for tighter markets
                         """)
                     else:
-                        st.warning("No viable structure found within risk parameters. Try adjusting max risk or min PoP.")
+                        st.warning("⚠️ Could not construct strategy. No liquid options meet criteria.")
 
     # ==========================================
     # MODULE C: SNIPER (Single Stock Deep Dive)
