@@ -1646,8 +1646,19 @@ def main():
                     # CAPITAL ALLOCATOR ENGINE: EV FORMULAS, PROBABILITY PROXIES, QUALITY SCORING
                     # ============================================================================
                     
+                    # Get ATM implied volatility from chain for probability calculations
+                    atm_options = liquid_chain[liquid_chain["strike"] == atm_strike]
+                    if not atm_options.empty:
+                        mkt_iv_calc = atm_options["impliedVolatility"].mean()
+                    else:
+                        # Fallback: use median IV from near-ATM options
+                        near_atm = liquid_chain[(liquid_chain["strike"] >= spot * 0.95) & (liquid_chain["strike"] <= spot * 1.05)]
+                        mkt_iv_calc = near_atm["impliedVolatility"].median() if not near_atm.empty else 0.30
+                    
+                    mkt_iv_calc = max(mkt_iv_calc, 0.10)  # Floor at 10% IV
+                    
                     # Implied move for probability calculations
-                    implied_move = spot * mkt_iv * np.sqrt(T)
+                    implied_move = spot * mkt_iv_calc * np.sqrt(T)
                     
                     # ----------------------------------------------
                     # 1. PROBABILITY PROXIES (When distribution sparse)
@@ -1830,7 +1841,7 @@ def main():
                                 prob_conf = get_probability_confidence(delta, row["spread_pct"], T)
                                 
                                 # IV PREMIUM PENALTY: If IV seems elevated vs historical
-                                iv_penalty = max(0, (row["impliedVolatility"] - mkt_iv) * exec_cost * 0.5)
+                                iv_penalty = max(0, (row["impliedVolatility"] - mkt_iv_calc) * exec_cost * 0.5)
                                 
                                 # EV FORMULA: Long Option
                                 avg_payoff = spot * row["impliedVolatility"] * np.sqrt(T)  # Expected move
@@ -1871,7 +1882,7 @@ def main():
                             elif best_ev["ev_dollars"] > 0:
                                 exec_cost = best["exec_buy"]
                                 breakeven = best["strike"] + exec_cost
-                                prob_be = 1 - norm.cdf((np.log(breakeven/spot) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T)))
+                                prob_be = 1 - norm.cdf((np.log(breakeven/spot) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T)))
                                 
                                 legs = [{
                                     "type": "CALL", "strike": best["strike"], "direction": "LONG",
@@ -1915,7 +1926,7 @@ def main():
                                 prob_itm = prob_delta_proxy(delta, is_long_dated=is_long_dated)
                                 prob_conf = get_probability_confidence(delta, row["spread_pct"], T)
                                 
-                                iv_penalty = max(0, (row["impliedVolatility"] - mkt_iv) * exec_cost * 0.5)
+                                iv_penalty = max(0, (row["impliedVolatility"] - mkt_iv_calc) * exec_cost * 0.5)
                                 avg_payoff = spot * row["impliedVolatility"] * np.sqrt(T)
                                 ev = ev_long_option(prob_itm, avg_payoff, exec_cost, iv_penalty)
                                 ev_per_risk = ev / exec_cost if exec_cost > 0 else 0
@@ -1950,7 +1961,7 @@ def main():
                             elif best_ev["ev_dollars"] > 0:
                                 exec_cost = best["exec_buy"]
                                 breakeven = best["strike"] - exec_cost
-                                prob_be = norm.cdf((np.log(breakeven/spot) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T)))
+                                prob_be = norm.cdf((np.log(breakeven/spot) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T)))
                                 
                                 legs = [{
                                     "type": "PUT", "strike": best["strike"], "direction": "LONG",
@@ -2004,14 +2015,14 @@ def main():
                                     continue  # Suppress unrealistic R:R
                                 
                                 # PROBABILITY CALCULATIONS with confidence scoring
-                                d2_short = (np.log(spot/short_call["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_short = (np.log(spot/short_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 p_above_short = norm.cdf(d2_short)
                                 
-                                d2_long = (np.log(spot/long_call["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_long = (np.log(spot/long_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 p_below_long = 1 - norm.cdf(d2_long)
                                 
                                 breakeven = long_call["strike"] + exec_debit
-                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_profit = norm.cdf(d2_be)
                                 
                                 # EV FORMULA: Vertical Debit Spread
@@ -2116,16 +2127,16 @@ def main():
                                 
                                 # PROBABILITY CALCULATIONS
                                 # P(max profit) = P(spot < short strike)
-                                d2_short = (np.log(spot/short_put["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_short = (np.log(spot/short_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_profit = 1 - norm.cdf(d2_short)
                                 
                                 # P(max loss) = P(spot > long strike)
-                                d2_long = (np.log(spot/long_put["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_long = (np.log(spot/long_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_loss = norm.cdf(d2_long)
                                 
                                 # P(profit) = P(spot < breakeven)
                                 breakeven = long_put["strike"] - exec_debit
-                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_profit = 1 - norm.cdf(d2_be)
                                 
                                 # EV CALCULATION
@@ -2203,16 +2214,16 @@ def main():
                                 
                                 # PROBABILITY CALCULATIONS (model-implied)
                                 # P(max profit) = P(spot > short strike at expiry)
-                                d2_short = (np.log(spot/short_put["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_short = (np.log(spot/short_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_profit = norm.cdf(d2_short)
                                 
                                 # P(max loss) = P(spot < long strike)
-                                d2_long = (np.log(spot/long_put["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_long = (np.log(spot/long_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_loss = 1 - norm.cdf(d2_long)
                                 
                                 # P(profit) = P(spot > breakeven = short - credit)
                                 breakeven = short_put["strike"] - exec_credit
-                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_profit = norm.cdf(d2_be)
                                 
                                 if prob_profit < min_pop:
@@ -2292,16 +2303,16 @@ def main():
                                 
                                 # PROBABILITY CALCULATIONS
                                 # P(max profit) = P(spot < short strike at expiry)
-                                d2_short = (np.log(spot/short_call["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_short = (np.log(spot/short_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_profit = 1 - norm.cdf(d2_short)
                                 
                                 # P(max loss) = P(spot > long strike)
-                                d2_long = (np.log(spot/long_call["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_long = (np.log(spot/long_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_max_loss = norm.cdf(d2_long)
                                 
                                 # P(profit) = P(spot < breakeven = short + credit)
                                 breakeven = short_call["strike"] + exec_credit
-                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                                d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                                 prob_profit = 1 - norm.cdf(d2_be)
                                 
                                 if prob_profit < min_pop:
@@ -2373,19 +2384,19 @@ def main():
                             
                             # PROBABILITY CALCULATIONS for straddle
                             # P(profit) = P(spot > BE_up) + P(spot < BE_down)
-                            d2_up = (np.log(spot/breakeven_up) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
-                            d2_down = (np.log(spot/breakeven_down) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                            d2_up = (np.log(spot/breakeven_up) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                            d2_down = (np.log(spot/breakeven_down) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                             prob_profit = norm.cdf(d2_up) + (1 - norm.cdf(d2_down))
                             
                             # EV: Expected absolute move minus cost
-                            expected_move = spot * mkt_iv * np.sqrt(T) * 0.8  # Expected absolute move
+                            expected_move = spot * mkt_iv_calc * np.sqrt(T) * 0.8  # Expected absolute move
                             ev = expected_move - exec_cost
                             ev_per_risk = ev / exec_cost if exec_cost > 0 else 0
                             
                             if total_slippage > exec_cost * 0.15:
                                 rejection_reasons.append(f"Straddle slippage too high: ${total_slippage:.2f} on ${exec_cost:.2f} cost")
                             elif ev <= 0:
-                                rejection_reasons.append(f"Straddle EV negative: ${ev:.2f} (need {move_needed:.1%} move, expected {mkt_iv*np.sqrt(T)*0.8:.1%})")
+                                rejection_reasons.append(f"Straddle EV negative: ${ev:.2f} (need {move_needed:.1%} move, expected {mkt_iv_calc*np.sqrt(T)*0.8:.1%})")
                             else:
                                 legs = [
                                     {"type": "CALL", "strike": c["strike"], "direction": "LONG",
@@ -2417,11 +2428,11 @@ def main():
                             breakeven_down = p["strike"] - exec_cost
                             
                             # PROBABILITY CALCULATIONS
-                            d2_up = (np.log(spot/breakeven_up) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
-                            d2_down = (np.log(spot/breakeven_down) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                            d2_up = (np.log(spot/breakeven_up) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                            d2_down = (np.log(spot/breakeven_down) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                             prob_profit = norm.cdf(d2_up) + (1 - norm.cdf(d2_down))
                             
-                            expected_move = spot * mkt_iv * np.sqrt(T) * 0.8
+                            expected_move = spot * mkt_iv_calc * np.sqrt(T) * 0.8
                             ev = expected_move - exec_cost
                             ev_per_risk = ev / exec_cost if exec_cost > 0 else 0
                             
@@ -2461,8 +2472,8 @@ def main():
                             
                             # PROBABILITY CALCULATIONS
                             # P(max profit) = P(put_short < spot < call_short)
-                            d2_put = (np.log(spot/put_short["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
-                            d2_call = (np.log(spot/call_short["strike"]) + (rf/100 - 0.5*mkt_iv**2)*T) / (mkt_iv*np.sqrt(T))
+                            d2_put = (np.log(spot/put_short["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                            d2_call = (np.log(spot/call_short["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
                             prob_max_profit = norm.cdf(d2_call) - (1 - norm.cdf(d2_put))
                             prob_max_profit = max(0, min(1, prob_max_profit))
                             
