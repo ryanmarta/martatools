@@ -1701,6 +1701,69 @@ def main():
                         return confidence
                     
                     # ----------------------------------------------
+                    # VERTICAL SPREAD PROBABILITY HELPERS
+                    # ----------------------------------------------
+                    
+                    def clamp_probability(p, T_years=0.1):
+                        """
+                        Clamp probabilities to avoid 0% or 100%.
+                        Tighter bounds for long-dated trades to reflect tail risk.
+                        """
+                        if T_years > 0.25:  # > 3 months
+                            return min(max(p, 0.02), 0.98)
+                        elif T_years > 0.5:  # > 6 months
+                            return min(max(p, 0.05), 0.95)
+                        else:
+                            return min(max(p, 0.01), 0.99)
+                    
+                    def apply_tail_risk_floor(prob_max_profit, prob_loss, T_years, is_deep_itm=False):
+                        """
+                        Apply tail-risk sanity floor.
+                        Deep ITM spreads still have non-zero tail risk.
+                        """
+                        # Base tail risk epsilon (increases with time)
+                        epsilon = 0.005 + (T_years * 0.02)  # 0.5% to 2%+ based on tenor
+                        
+                        # Higher tail risk for deep ITM structures
+                        if is_deep_itm:
+                            epsilon = max(epsilon, 0.02)  # At least 2% tail risk
+                        
+                        # Adjust probabilities
+                        adj_prob_max_profit = prob_max_profit * (1 - epsilon)
+                        adj_prob_loss = prob_loss + (epsilon * 0.5)  # Add tail component
+                        
+                        return adj_prob_max_profit, adj_prob_loss, epsilon
+                    
+                    def is_deep_itm_spread(spot, long_strike, short_strike, spread_type="call"):
+                        """
+                        Detect if spread is deep ITM (short strike far from spot).
+                        """
+                        if spread_type == "call":
+                            # Bull call: deep ITM if short strike << spot
+                            distance_pct = (spot - short_strike) / spot
+                            return distance_pct > 0.15  # Short strike >15% below spot
+                        else:
+                            # Bear put: deep ITM if short strike >> spot
+                            distance_pct = (short_strike - spot) / spot
+                            return distance_pct > 0.15
+                    
+                    def get_spread_risk_label(prob_max_profit, prob_loss, is_deep_itm, tail_epsilon):
+                        """
+                        Generate appropriate risk label for vertical spreads.
+                        Never use "riskless" or "guaranteed".
+                        """
+                        if is_deep_itm and prob_max_profit > 0.85:
+                            return "⚠️ HIGH-PROB/HIGH-TAIL-RISK", "Deep ITM structure with concentrated tail risk"
+                        elif prob_max_profit > 0.90:
+                            return "📈 HIGH PROBABILITY", f"Model-estimated (tail risk: {tail_epsilon:.1%})"
+                        elif prob_max_profit > 0.70:
+                            return "✅ FAVORABLE ODDS", "Probability supports thesis"
+                        elif prob_max_profit > 0.50:
+                            return "⚡ MODERATE ODDS", "Balanced risk/reward"
+                        else:
+                            return "⚠️ SPECULATIVE", "Low probability of max profit"
+                    
+                    # ----------------------------------------------
                     # 2. ONE-LINE EV FORMULAS BY STRATEGY TYPE
                     # ----------------------------------------------
                     
@@ -2018,19 +2081,43 @@ def main():
                                 if rr_ratio > 10:
                                     continue  # Suppress unrealistic R:R
                                 
-                                # PROBABILITY CALCULATIONS with confidence scoring
-                                d2_short = (np.log(spot/short_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                p_above_short = norm.cdf(d2_short)
+                                # ========================================
+                                # VERTICAL PROBABILITY DEFINITIONS (EXACT)
+                                # ========================================
+                                K_long = long_call["strike"]
+                                K_short = short_call["strike"]
+                                breakeven = K_long + exec_debit
                                 
-                                d2_long = (np.log(spot/long_call["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                p_below_long = 1 - norm.cdf(d2_long)
+                                # P(Max Profit) = P(S_T >= K_short) - probability spot finishes above short strike
+                                d2_short = (np.log(spot/K_short) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                                p_max_profit_raw = norm.cdf(d2_short)
                                 
-                                breakeven = long_call["strike"] + exec_debit
+                                # P(Max Loss) = P(S_T <= K_long) - probability spot finishes below long strike
+                                d2_long = (np.log(spot/K_long) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                                p_max_loss_raw = 1 - norm.cdf(d2_long)
+                                
+                                # P(Profit) = P(S_T >= breakeven) - probability spot finishes above breakeven
                                 d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                prob_profit = norm.cdf(d2_be)
+                                p_profit_raw = norm.cdf(d2_be)
+                                
+                                # DEEP ITM CHECK
+                                deep_itm = is_deep_itm_spread(spot, K_long, K_short, "call")
+                                
+                                # APPLY TAIL RISK FLOOR (no 0% or 100%)
+                                p_max_profit, p_max_loss, tail_eps = apply_tail_risk_floor(
+                                    p_max_profit_raw, p_max_loss_raw, T, is_deep_itm=deep_itm
+                                )
+                                
+                                # CLAMP ALL PROBABILITIES (never 0% or 100%)
+                                p_max_profit = clamp_probability(p_max_profit, T)
+                                p_max_loss = clamp_probability(p_max_loss, T)
+                                prob_profit = clamp_probability(p_profit_raw, T)
+                                
+                                # SANITY: P(Profit) must be >= P(Max Profit)
+                                prob_profit = max(prob_profit, p_max_profit)
                                 
                                 # EV FORMULA: Vertical Debit Spread
-                                ev = ev_vertical_debit(p_above_short, p_below_long, width, exec_debit)
+                                ev = ev_vertical_debit(p_max_profit, p_max_loss, width, exec_debit)
                                 ev_per_risk = ev / (max_loss * 100) if max_loss > 0 else 0
                                 
                                 # PROBABILITY CONFIDENCE
@@ -2038,23 +2125,34 @@ def main():
                                 avg_delta = (abs(long_call.get("delta", 0.5)) + abs(short_call.get("delta", 0.3))) / 2
                                 prob_conf = get_probability_confidence(avg_delta, avg_spread_pct, T)
                                 
+                                # PENALIZE DEEP ITM (high prob but high tail risk, low edge)
+                                if deep_itm:
+                                    prob_conf *= 0.8  # Lower confidence for deep ITM
+                                
                                 liquidity = 1 - max(long_call["spread_pct"], short_call["spread_pct"])
                                 slippage_ratio = total_slippage / max_profit if max_profit > 0 else 1
                                 
                                 # TRADE QUALITY SCORE (complexity = 2 for spreads)
+                                # Penalize deep ITM structures
+                                complexity_adj = 2.5 if deep_itm else 2
                                 quality = calc_trade_quality_score(
                                     ev=ev/100, max_loss=max_loss, prob_profit=prob_profit,
-                                    prob_confidence=prob_conf, liquidity_score=liquidity, complexity=2
+                                    prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
                                 )
+                                
+                                # Get risk label
+                                risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
                                 
                                 spread_candidates.append({
                                     "long": long_call, "short": short_call,
                                     "exec_debit": exec_debit, "max_profit": max_profit, "max_loss": max_loss,
                                     "rr": rr_ratio, "slippage": total_slippage,
                                     "ev_dollars": ev, "ev_per_risk": ev_per_risk,
-                                    "prob_profit": prob_profit, "prob_max_profit": p_above_short,
+                                    "prob_profit": prob_profit, "prob_max_profit": p_max_profit,
+                                    "prob_max_loss": p_max_loss, "tail_epsilon": tail_eps,
                                     "prob_conf": prob_conf, "liquidity": liquidity, "breakeven": breakeven,
-                                    "quality": quality, "slippage_ratio": slippage_ratio
+                                    "quality": quality, "slippage_ratio": slippage_ratio,
+                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel
                                 })
                         
                         if spread_candidates:
@@ -2078,17 +2176,25 @@ def main():
                                      "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                                 ]
                                 
-                                label, sublabel = get_trade_label(
-                                    best_spread["quality"], best_spread["ev_dollars"]/100,
-                                    best_spread["prob_profit"], best_spread["prob_conf"]
-                                )
+                                # Use spread-specific risk label for deep ITM, otherwise standard label
+                                if best_spread.get("is_deep_itm"):
+                                    label = best_spread["risk_label"]
+                                    sublabel = best_spread["risk_sublabel"]
+                                else:
+                                    label, sublabel = get_trade_label(
+                                        best_spread["quality"], best_spread["ev_dollars"]/100,
+                                        best_spread["prob_profit"], best_spread["prob_conf"]
+                                    )
                                 
                                 trade_metrics["ev_dollars"] = best_spread["ev_dollars"] / 100
                                 trade_metrics["ev_per_dollar_risked"] = best_spread["ev_per_risk"]
                                 trade_metrics["prob_profit"] = best_spread["prob_profit"]
                                 trade_metrics["prob_max_profit"] = best_spread["prob_max_profit"]
+                                trade_metrics["prob_max_loss"] = best_spread.get("prob_max_loss", 0)
                                 trade_metrics["prob_breakeven"] = best_spread["prob_profit"]
                                 trade_metrics["prob_confidence"] = best_spread["prob_conf"]
+                                trade_metrics["tail_epsilon"] = best_spread.get("tail_epsilon", 0.01)
+                                trade_metrics["is_deep_itm"] = best_spread.get("is_deep_itm", False)
                                 trade_metrics["liquidity_score"] = best_spread["liquidity"]
                                 trade_metrics["quality_score"] = best_spread["quality"]
                                 trade_metrics["trade_label"] = label
@@ -2097,6 +2203,7 @@ def main():
                                 trade_metrics["max_profit"] = best_spread["max_profit"] * 100
                                 trade_metrics["max_loss"] = best_spread["max_loss"] * 100
                                 trade_metrics["rr_ratio"] = best_spread["rr"]
+                                trade_metrics["breakeven"] = best_spread["breakeven"]
                                 
                                 trade_viable = True
                             elif best_spread["max_loss"] * 100 > max_risk:
@@ -2129,43 +2236,84 @@ def main():
                                 if rr_ratio > 10:
                                     continue
                                 
-                                # PROBABILITY CALCULATIONS
-                                # P(max profit) = P(spot < short strike)
-                                d2_short = (np.log(spot/short_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                prob_max_profit = 1 - norm.cdf(d2_short)
+                                # ========================================
+                                # VERTICAL PROBABILITY DEFINITIONS (EXACT)
+                                # ========================================
+                                K_long = long_put["strike"]
+                                K_short = short_put["strike"]
+                                breakeven = K_long - exec_debit
                                 
-                                # P(max loss) = P(spot > long strike)
-                                d2_long = (np.log(spot/long_put["strike"]) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                prob_max_loss = norm.cdf(d2_long)
+                                # P(Max Profit) = P(S_T <= K_short) - probability spot finishes below short strike
+                                d2_short = (np.log(spot/K_short) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                                p_max_profit_raw = 1 - norm.cdf(d2_short)
                                 
-                                # P(profit) = P(spot < breakeven)
-                                breakeven = long_put["strike"] - exec_debit
+                                # P(Max Loss) = P(S_T >= K_long) - probability spot finishes above long strike
+                                d2_long = (np.log(spot/K_long) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
+                                p_max_loss_raw = norm.cdf(d2_long)
+                                
+                                # P(Profit) = P(S_T <= breakeven)
                                 d2_be = (np.log(spot/breakeven) + (rf/100 - 0.5*mkt_iv_calc**2)*T) / (mkt_iv_calc*np.sqrt(T))
-                                prob_profit = 1 - norm.cdf(d2_be)
+                                p_profit_raw = 1 - norm.cdf(d2_be)
+                                
+                                # DEEP ITM CHECK (for puts, short strike >> spot means deep ITM)
+                                deep_itm = is_deep_itm_spread(spot, K_long, K_short, "put")
+                                
+                                # APPLY TAIL RISK FLOOR
+                                p_max_profit, p_max_loss, tail_eps = apply_tail_risk_floor(
+                                    p_max_profit_raw, p_max_loss_raw, T, is_deep_itm=deep_itm
+                                )
+                                
+                                # CLAMP ALL PROBABILITIES
+                                p_max_profit = clamp_probability(p_max_profit, T)
+                                p_max_loss = clamp_probability(p_max_loss, T)
+                                prob_profit = clamp_probability(p_profit_raw, T)
+                                
+                                # SANITY: P(Profit) must be >= P(Max Profit)
+                                prob_profit = max(prob_profit, p_max_profit)
                                 
                                 # EV CALCULATION
-                                prob_between = max(0, 1 - prob_max_profit - prob_max_loss)
+                                prob_between = max(0, 1 - p_max_profit - p_max_loss)
                                 avg_partial_payoff = (max_profit / 2)
                                 
-                                ev = (prob_max_profit * max_profit) + (prob_between * avg_partial_payoff) - (prob_max_loss * max_loss)
+                                ev = (p_max_profit * max_profit) + (prob_between * avg_partial_payoff) - (p_max_loss * max_loss)
                                 ev_per_risk = ev / max_loss if max_loss > 0 else 0
                                 
                                 if ev <= 0:
                                     continue
                                 
+                                # PROBABILITY CONFIDENCE
+                                avg_spread_pct = (long_put["spread_pct"] + short_put["spread_pct"]) / 2
+                                avg_delta = (abs(long_put.get("delta", -0.5)) + abs(short_put.get("delta", -0.3))) / 2
+                                prob_conf = get_probability_confidence(avg_delta, avg_spread_pct, T)
+                                
+                                if deep_itm:
+                                    prob_conf *= 0.8
+                                
                                 liquidity = 1 - max(long_put["spread_pct"], short_put["spread_pct"])
+                                slippage_ratio = total_slippage / max_profit if max_profit > 0 else 1
+                                
+                                complexity_adj = 2.5 if deep_itm else 2
+                                quality = calc_trade_quality_score(
+                                    ev=ev/100, max_loss=max_loss, prob_profit=prob_profit,
+                                    prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
+                                )
+                                
+                                risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
                                 
                                 spread_candidates.append({
                                     "long": long_put, "short": short_put,
                                     "exec_debit": exec_debit, "max_profit": max_profit, "max_loss": max_loss,
                                     "rr": rr_ratio, "slippage": total_slippage,
                                     "ev_dollars": ev, "ev_per_risk": ev_per_risk,
-                                    "prob_profit": prob_profit, "prob_max_profit": prob_max_profit,
-                                    "prob_max_loss": prob_max_loss, "liquidity": liquidity, "breakeven": breakeven
+                                    "prob_profit": prob_profit, "prob_max_profit": p_max_profit,
+                                    "prob_max_loss": p_max_loss, "tail_epsilon": tail_eps,
+                                    "prob_conf": prob_conf, "liquidity": liquidity, "breakeven": breakeven,
+                                    "quality": quality, "slippage_ratio": slippage_ratio,
+                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel
                                 })
                         
                         if spread_candidates:
-                            spread_candidates.sort(key=lambda x: (x["ev_dollars"], x["prob_profit"], x["liquidity"]), reverse=True)
+                            spread_candidates.sort(key=lambda x: x["quality"], reverse=True)
                             best_spread = spread_candidates[0]
                             
                             if best_spread["max_loss"] * 100 <= max_risk:
@@ -2176,15 +2324,33 @@ def main():
                                      "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                                 ]
                                 
+                                if best_spread.get("is_deep_itm"):
+                                    label = best_spread["risk_label"]
+                                    sublabel = best_spread["risk_sublabel"]
+                                else:
+                                    label, sublabel = get_trade_label(
+                                        best_spread["quality"], best_spread["ev_dollars"]/100,
+                                        best_spread["prob_profit"], best_spread["prob_conf"]
+                                    )
+                                
                                 trade_metrics["ev_dollars"] = best_spread["ev_dollars"]
                                 trade_metrics["ev_per_dollar_risked"] = best_spread["ev_per_risk"]
                                 trade_metrics["prob_profit"] = best_spread["prob_profit"]
                                 trade_metrics["prob_max_profit"] = best_spread["prob_max_profit"]
+                                trade_metrics["prob_max_loss"] = best_spread.get("prob_max_loss", 0)
                                 trade_metrics["prob_breakeven"] = best_spread["prob_profit"]
+                                trade_metrics["prob_confidence"] = best_spread["prob_conf"]
+                                trade_metrics["tail_epsilon"] = best_spread.get("tail_epsilon", 0.01)
+                                trade_metrics["is_deep_itm"] = best_spread.get("is_deep_itm", False)
                                 trade_metrics["liquidity_score"] = best_spread["liquidity"]
+                                trade_metrics["quality_score"] = best_spread["quality"]
+                                trade_metrics["trade_label"] = label
+                                trade_metrics["trade_sublabel"] = sublabel
+                                trade_metrics["complexity"] = 2
                                 trade_metrics["max_profit"] = best_spread["max_profit"] * 100
                                 trade_metrics["max_loss"] = best_spread["max_loss"] * 100
                                 trade_metrics["rr_ratio"] = best_spread["rr"]
+                                trade_metrics["breakeven"] = best_spread["breakeven"]
                                 
                                 trade_viable = True
                             else:
@@ -2574,63 +2740,94 @@ def main():
                         ev = trade_metrics["ev_dollars"]
                         ev_per_risk = trade_metrics["ev_per_dollar_risked"] or 0
                         prob_profit = trade_metrics["prob_profit"] or 0
+                        prob_max_profit = trade_metrics.get("prob_max_profit", prob_profit)
+                        prob_max_loss = trade_metrics.get("prob_max_loss", 0)
                         prob_conf = trade_metrics.get("prob_confidence", 0.7)
+                        tail_eps = trade_metrics.get("tail_epsilon", 0.01)
+                        is_deep_itm = trade_metrics.get("is_deep_itm", False)
                         quality = trade_metrics.get("quality_score", 0)
                         trade_label = trade_metrics.get("trade_label", "✅ ACCEPTABLE")
                         trade_sublabel = trade_metrics.get("trade_sublabel", "")
                         complexity = trade_metrics.get("complexity", 1)
                         
-                        # TRADE QUALITY HEADER (Replaces generic success message)
-                        label_color = "#10B981" if "🎯" in trade_label or "✅" in trade_label else "#F59E0B" if "⚡" in trade_label else "#EF4444"
-                        st.markdown(f"""
-                        <div style="background: linear-gradient(135deg, {label_color}20, {label_color}10); 
-                                    padding: 16px; border-radius: 12px; border: 2px solid {label_color}; margin: 12px 0;">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div>
-                                    <span style="font-size: 1.3rem; font-weight: 700; color: {label_color};">{trade_label}</span>
-                                    <span style="font-size: 0.85rem; color: #94A3B8; margin-left: 12px;">{trade_sublabel}</span>
-                                </div>
-                                <div style="text-align: right;">
-                                    <div style="font-size: 0.7rem; color: #64748B;">Quality Score</div>
-                                    <div style="font-size: 1.1rem; font-weight: 600; color: {label_color};">{quality:.3f}</div>
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        # TRADE QUALITY HEADER
+                        label_color = "#10B981" if "🎯" in trade_label or "✅" in trade_label or "📈" in trade_label else "#F59E0B" if "⚡" in trade_label else "#EF4444"
+                        st.markdown(f"""<div style="background: linear-gradient(135deg, {label_color}20, {label_color}10); padding: 16px; border-radius: 12px; border: 2px solid {label_color}; margin: 12px 0;">
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<div>
+<span style="font-size: 1.3rem; font-weight: 700; color: {label_color};">{trade_label}</span>
+<span style="font-size: 0.85rem; color: #94A3B8; margin-left: 12px;">{trade_sublabel}</span>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 0.7rem; color: #64748B;">Quality Score</div>
+<div style="font-size: 1.1rem; font-weight: 600; color: {label_color};">{quality:.3f}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
                         
                         # PRIMARY METRICS CARD (EV is dominant)
                         ev_color = "#10B981" if ev > 0.5 else "#F59E0B" if ev > 0 else "#EF4444"
                         conf_color = "#10B981" if prob_conf > 0.7 else "#F59E0B" if prob_conf > 0.5 else "#EF4444"
                         
-                        st.markdown(f"""
-                        <div style="background: linear-gradient(135deg, #1E293B, #334155); color: white; padding: 20px; border-radius: 12px; margin: 16px 0;">
-                            <h3 style="margin: 0 0 12px 0; color: #10B981;">📋 {strategy_type}</h3>
-                            <p style="color: #94A3B8; margin: 0 0 16px 0;">Underlying: <strong>{ticker}</strong> @ ${spot:.2f} | Expiry: {sel_exp} | Complexity: {complexity}</p>
+                        st.markdown(f"""<div style="background: linear-gradient(135deg, #1E293B, #334155); color: white; padding: 20px; border-radius: 12px; margin: 16px 0;">
+<h3 style="margin: 0 0 12px 0; color: #10B981;">📋 {strategy_type}</h3>
+<p style="color: #94A3B8; margin: 0 0 16px 0;">Underlying: <strong>{ticker}</strong> @ ${spot:.2f} | Expiry: {sel_exp} | Complexity: {complexity}</p>
+<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+<div style="background: rgba(16,185,129,0.15); padding: 12px; border-radius: 8px; text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">Expected Value</div>
+<div style="font-size: 1.4rem; font-weight: 700; color: {ev_color};">${ev:.2f}</div>
+<div style="font-size: 0.65rem; color: #64748B;">Slippage-adjusted</div>
+</div>
+<div style="background: rgba(59,130,246,0.15); padding: 12px; border-radius: 8px; text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">EV per $ Risked</div>
+<div style="font-size: 1.4rem; font-weight: 700; color: #3B82F6;">{ev_per_risk:.1%}</div>
+<div style="font-size: 0.65rem; color: #64748B;">Edge metric</div>
+</div>
+<div style="background: rgba(168,85,247,0.15); padding: 12px; border-radius: 8px; text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">P(Profit)</div>
+<div style="font-size: 1.4rem; font-weight: 700; color: #A855F7;">{prob_profit:.0%}</div>
+<div style="font-size: 0.65rem; color: #64748B;">Above breakeven</div>
+</div>
+<div style="background: rgba(251,191,36,0.15); padding: 12px; border-radius: 8px; text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">Prob Confidence</div>
+<div style="font-size: 1.4rem; font-weight: 700; color: {conf_color};">{prob_conf:.0%}</div>
+<div style="font-size: 0.65rem; color: #64748B;">Estimate reliability</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
+                        
+                        # VERTICAL SPREAD: Show P(Max Profit) vs P(Profit) distinction
+                        if strategy_type in ["Bull Call Spread", "Bear Put Spread", "Bull Put Spread (Credit)", "Bear Call Spread (Credit)"]:
+                            pmax_color = "#10B981" if prob_max_profit > 0.7 else "#F59E0B" if prob_max_profit > 0.4 else "#EF4444"
+                            ploss_color = "#EF4444" if prob_max_loss > 0.3 else "#F59E0B" if prob_max_loss > 0.15 else "#10B981"
                             
-                            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                                <div style="background: rgba(16,185,129,0.15); padding: 12px; border-radius: 8px; text-align: center;">
-                                    <div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">Expected Value</div>
-                                    <div style="font-size: 1.4rem; font-weight: 700; color: {ev_color};">${ev:.2f}</div>
-                                    <div style="font-size: 0.65rem; color: #64748B;">Slippage-adjusted</div>
-                                </div>
-                                <div style="background: rgba(59,130,246,0.15); padding: 12px; border-radius: 8px; text-align: center;">
-                                    <div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">EV per $ Risked</div>
-                                    <div style="font-size: 1.4rem; font-weight: 700; color: #3B82F6;">{ev_per_risk:.1%}</div>
-                                    <div style="font-size: 0.65rem; color: #64748B;">Edge metric</div>
-                                </div>
-                                <div style="background: rgba(168,85,247,0.15); padding: 12px; border-radius: 8px; text-align: center;">
-                                    <div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">P(Profit)</div>
-                                    <div style="font-size: 1.4rem; font-weight: 700; color: #A855F7;">{prob_profit:.0%}</div>
-                                    <div style="font-size: 0.65rem; color: #64748B;">Model-implied</div>
-                                </div>
-                                <div style="background: rgba(251,191,36,0.15); padding: 12px; border-radius: 8px; text-align: center;">
-                                    <div style="font-size: 0.7rem; color: #94A3B8; text-transform: uppercase;">Prob Confidence</div>
-                                    <div style="font-size: 1.4rem; font-weight: 700; color: {conf_color};">{prob_conf:.0%}</div>
-                                    <div style="font-size: 0.65rem; color: #64748B;">Estimate reliability</div>
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            # Warning for deep ITM
+                            deep_itm_warning = ""
+                            if is_deep_itm:
+                                deep_itm_warning = '<div style="background: rgba(239,68,68,0.2); padding: 8px; border-radius: 6px; margin-top: 12px; font-size: 0.8rem; color: #FCA5A5;">⚠️ Deep ITM structure: High probability but concentrated tail risk. Not riskless.</div>'
+                            
+                            st.markdown(f"""<div style="background: rgba(30,41,59,0.5); padding: 16px; border-radius: 10px; margin: 12px 0;">
+<div style="font-size: 0.8rem; color: #64748B; margin-bottom: 10px; text-transform: uppercase;">Vertical Spread Probabilities (Model-Estimated)</div>
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+<div style="text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8;">P(Max Profit)</div>
+<div style="font-size: 1.2rem; font-weight: 600; color: {pmax_color};">{prob_max_profit:.0%}</div>
+<div style="font-size: 0.6rem; color: #64748B;">Spot beyond short strike</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8;">P(Any Profit)</div>
+<div style="font-size: 1.2rem; font-weight: 600; color: #A855F7;">{prob_profit:.0%}</div>
+<div style="font-size: 0.6rem; color: #64748B;">Above breakeven</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.7rem; color: #94A3B8;">P(Max Loss)</div>
+<div style="font-size: 1.2rem; font-weight: 600; color: {ploss_color};">{prob_max_loss:.0%}</div>
+<div style="font-size: 0.6rem; color: #64748B;">Spot beyond long strike</div>
+</div>
+</div>
+<div style="font-size: 0.65rem; color: #64748B; margin-top: 10px; text-align: center;">Tail risk floor applied: {tail_eps:.1%} minimum adverse probability</div>
+{deep_itm_warning}
+</div>""", unsafe_allow_html=True)
                         
                         # TRADE VIABILITY ASSESSMENT
                         viability_items = []
