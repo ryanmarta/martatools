@@ -1599,6 +1599,22 @@ def main():
             with liq_col2:
                 max_spread_pct = st.slider("Max Bid-Ask Spread %", 0.05, 0.30, 0.15, help="Reject options with wider spreads")
             
+            # TRADER MODE SETTINGS
+            st.markdown("**🎯 Trade Selection Mode:**")
+            mode_col1, mode_col2 = st.columns(2)
+            with mode_col1:
+                trader_mode = st.radio(
+                    "Selection Mode",
+                    ["Trader (Convexity)", "Capital Substitution"],
+                    index=0,
+                    help="Trader mode prioritizes convexity & non-linear payoffs. Capital sub allows deep ITM equity-like structures."
+                )
+            with mode_col2:
+                require_convexity = st.checkbox("Require Convexity", value=True, 
+                    help="Reject trades with near-linear payoffs")
+                strike_proximity = st.slider("Max Strike Distance %", 0.15, 0.50, 0.30,
+                    help="At least one strike must be within this % of spot")
+            
             if st.button("🔍 Find Executable Structure", type="primary"):
                 with st.spinner("Filtering for liquid, executable trades..."):
                     
@@ -1762,6 +1778,145 @@ def main():
                             return "⚡ MODERATE ODDS", "Balanced risk/reward"
                         else:
                             return "⚠️ SPECULATIVE", "Low probability of max profit"
+                    
+                    # ==============================================================
+                    # TRADER-FOCUSED TRADE SELECTION LOGIC
+                    # ==============================================================
+                    
+                    def check_strike_proximity(strike, spot, max_distance_pct=0.30):
+                        """
+                        STRIKE PROXIMITY CONSTRAINT: Strike must be within ±30% of spot.
+                        """
+                        distance = abs(strike - spot) / spot
+                        return distance <= max_distance_pct
+                    
+                    def check_spread_proximity(long_strike, short_strike, spot, max_distance_pct=0.30):
+                        """
+                        At least one primary strike must be within ±30% of spot.
+                        """
+                        long_ok = check_strike_proximity(long_strike, spot, max_distance_pct)
+                        short_ok = check_strike_proximity(short_strike, spot, max_distance_pct)
+                        return long_ok or short_ok
+                    
+                    def calc_convexity_score(delta, gamma, vega, spot, option_price):
+                        """
+                        CONVEXITY REQUIREMENT: Measure non-linear payoff characteristics.
+                        Returns score 0-1 where higher = more convex.
+                        """
+                        # Normalize gamma by spot squared and price
+                        gamma_contrib = abs(gamma) * (spot ** 2) / max(option_price * 100, 1) if gamma else 0
+                        
+                        # Normalize vega by price
+                        vega_contrib = abs(vega) / max(option_price * 100, 1) if vega else 0
+                        
+                        # Delta linearity penalty: |delta| near 0 or 1 = less convex
+                        delta_abs = abs(delta) if delta else 0.5
+                        linearity_penalty = 1 - abs(2 * delta_abs - 1)  # Max at delta=0.5
+                        
+                        # Combined convexity score
+                        convexity = (gamma_contrib * 0.4 + vega_contrib * 0.3 + linearity_penalty * 0.3)
+                        return min(convexity, 1.0)
+                    
+                    def calc_spread_convexity(long_delta, short_delta, long_gamma, short_gamma, long_vega, short_vega):
+                        """
+                        Calculate net convexity for a spread.
+                        Deep ITM spreads have near-zero convexity.
+                        """
+                        net_gamma = (long_gamma or 0) - (short_gamma or 0)
+                        net_vega = (long_vega or 0) - (short_vega or 0)
+                        net_delta = abs((long_delta or 0) - (short_delta or 0))
+                        
+                        # Convexity score based on net Greeks
+                        gamma_score = min(abs(net_gamma) * 100, 1.0)  # Scale gamma
+                        vega_score = min(abs(net_vega) / 10, 1.0)     # Scale vega
+                        
+                        # Penalty for synthetic-stock behavior (delta spread near 1)
+                        synthetic_penalty = 1 - min(net_delta, 1.0)
+                        
+                        convexity = (gamma_score * 0.4 + vega_score * 0.4 + synthetic_penalty * 0.2)
+                        return convexity
+                    
+                    def is_equity_substitute(long_delta, short_delta, net_gamma, net_vega):
+                        """
+                        Detect if spread behaves like synthetic stock (linear payoff).
+                        """
+                        net_delta = abs((long_delta or 0) - (short_delta or 0))
+                        # Synthetic if: high delta, near-zero gamma/vega
+                        if net_delta > 0.85 and abs(net_gamma or 0) < 0.001 and abs(net_vega or 0) < 0.5:
+                            return True
+                        return False
+                    
+                    def classify_thesis(strategy_type, direction, spot, long_strike, short_strike=None, iv_rank=None):
+                        """
+                        THESIS CLASSIFICATION: Categorize the trade thesis.
+                        Returns (category, one_sentence_thesis)
+                        """
+                        if strategy_type in ["Long Call", "Bull Call Spread", "Bull Put Spread (Credit)"]:
+                            if short_strike and abs(long_strike - spot) < spot * 0.05:
+                                thesis = "Bullish with upside convexity from near-ATM gamma exposure"
+                                category = "Directional + Convexity"
+                            else:
+                                thesis = "Bullish directional with defined risk"
+                                category = "Directional"
+                        elif strategy_type in ["Long Put", "Bear Put Spread", "Bear Call Spread (Credit)"]:
+                            if short_strike and abs(long_strike - spot) < spot * 0.05:
+                                thesis = "Bearish with downside convexity from near-ATM gamma"
+                                category = "Directional + Convexity"
+                            else:
+                                thesis = "Bearish directional with defined risk"
+                                category = "Directional"
+                        elif strategy_type in ["Long Straddle", "Long Strangle"]:
+                            thesis = "Long volatility via dual-sided gamma/vega exposure"
+                            category = "Volatility"
+                        elif strategy_type in ["Iron Condor"]:
+                            thesis = "Range-bound thesis with time decay capture"
+                            category = "Volatility (Short)"
+                        elif strategy_type in ["Iron Butterfly"]:
+                            thesis = "Pin risk thesis with max profit at ATM strike"
+                            category = "Volatility (Short)"
+                        else:
+                            thesis = "Defined risk structure"
+                            category = "Hybrid"
+                        
+                        return category, thesis
+                    
+                    def calc_payoff_acceleration(prob_max_profit, prob_profit, max_profit, max_loss, breakeven, spot):
+                        """
+                        PAYOFF ACCELERATION TEST: Does P/L accelerate favorably?
+                        Favors trades where incremental favorable movement causes accelerating returns.
+                        """
+                        # Distance to breakeven as % of spot
+                        be_distance = abs(breakeven - spot) / spot
+                        
+                        # Acceleration score: how quickly do we reach max profit after breakeven?
+                        profit_zone = (prob_profit - 0) if prob_profit > 0 else 0
+                        max_zone = prob_max_profit
+                        
+                        # Ratio of max profit zone to any profit zone (higher = more accelerated)
+                        if profit_zone > 0:
+                            acceleration = max_zone / profit_zone
+                        else:
+                            acceleration = 0
+                        
+                        # R:R component
+                        rr = max_profit / max_loss if max_loss > 0 else 0
+                        
+                        # Combined score favoring convex payoffs
+                        score = acceleration * 0.5 + min(rr / 3, 0.5)
+                        return min(score, 1.0)
+                    
+                    def get_trader_label(category, thesis, convexity_score, is_eq_sub):
+                        """
+                        Generate trader-centric labeling.
+                        """
+                        if is_eq_sub:
+                            return "⚠️ EQUITY SUBSTITUTE", "Linear payoff - not trader-grade convexity"
+                        elif convexity_score < 0.15:
+                            return "⚠️ LOW CONVEXITY", "Near-linear payoff structure"
+                        elif convexity_score > 0.5:
+                            return f"🎯 {category.upper()}", thesis
+                        else:
+                            return f"✅ {category.upper()}", thesis
                     
                     # ----------------------------------------------
                     # 2. ONE-LINE EV FORMULAS BY STRATEGY TYPE
@@ -2057,14 +2212,27 @@ def main():
                             else:
                                 rejection_reasons.append("All puts have EV ≤ $0 after execution costs")
                     
-                    # ============ VERTICAL SPREADS (Capital Allocator Logic) ============
+                    # ============ VERTICAL SPREADS (Trader-Focused Logic) ============
                     elif strategy_type == "Bull Call Spread":
                         spread_candidates = []
+                        trader_mode_active = trader_mode == "Trader (Convexity)"
                         
                         for _, long_call in calls[calls["strike"] <= spot * 1.05].iterrows():
                             for _, short_call in calls[calls["strike"] > long_call["strike"]].iterrows():
                                 if short_call["strike"] - long_call["strike"] > spot * 0.20:
                                     continue
+                                
+                                K_long = long_call["strike"]
+                                K_short = short_call["strike"]
+                                
+                                # ========================================
+                                # TRADER-FOCUSED CONSTRAINTS
+                                # ========================================
+                                
+                                # 1. STRIKE PROXIMITY CONSTRAINT
+                                if trader_mode_active:
+                                    if not check_spread_proximity(K_long, K_short, spot, strike_proximity):
+                                        continue  # Skip - both strikes too far from spot
                                 
                                 exec_debit = long_call["exec_buy"] - short_call["exec_sell"]
                                 width = short_call["strike"] - long_call["strike"]
@@ -2079,13 +2247,40 @@ def main():
                                 
                                 rr_ratio = max_profit / max_loss
                                 if rr_ratio > 10:
-                                    continue  # Suppress unrealistic R:R
+                                    continue
+                                
+                                # 2. CONVEXITY REQUIREMENT
+                                long_gamma = long_call.get("gamma", 0.01)
+                                short_gamma = short_call.get("gamma", 0.005)
+                                long_vega = long_call.get("vega", 0.1)
+                                short_vega = short_call.get("vega", 0.05)
+                                long_delta = long_call.get("delta", 0.5)
+                                short_delta = short_call.get("delta", 0.3)
+                                
+                                convexity_score = calc_spread_convexity(
+                                    long_delta, short_delta, long_gamma, short_gamma, long_vega, short_vega
+                                )
+                                
+                                # Check for equity substitute (linear payoff)
+                                net_gamma = (long_gamma or 0) - (short_gamma or 0)
+                                net_vega = (long_vega or 0) - (short_vega or 0)
+                                is_eq_sub = is_equity_substitute(long_delta, short_delta, net_gamma, net_vega)
+                                
+                                # In trader mode, reject equity substitutes and low convexity
+                                if trader_mode_active and require_convexity:
+                                    if is_eq_sub:
+                                        continue  # Skip equity substitute
+                                    if convexity_score < 0.10:
+                                        continue  # Skip low convexity
+                                
+                                # 3. THESIS CLASSIFICATION
+                                category, thesis = classify_thesis(
+                                    strategy_type, direction, spot, K_long, K_short
+                                )
                                 
                                 # ========================================
                                 # VERTICAL PROBABILITY DEFINITIONS (EXACT)
                                 # ========================================
-                                K_long = long_call["strike"]
-                                K_short = short_call["strike"]
                                 breakeven = K_long + exec_debit
                                 
                                 # P(Max Profit) = P(S_T >= K_short) - probability spot finishes above short strike
@@ -2140,8 +2335,24 @@ def main():
                                     prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
                                 )
                                 
-                                # Get risk label
-                                risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
+                                # 4. PAYOFF ACCELERATION
+                                payoff_accel = calc_payoff_acceleration(
+                                    p_max_profit, prob_profit, max_profit, max_loss, breakeven, spot
+                                )
+                                
+                                # TRADER-ADJUSTED QUALITY SCORE
+                                # In trader mode: boost convexity, penalize equity substitutes
+                                if trader_mode_active:
+                                    convexity_boost = convexity_score * 0.3
+                                    eq_sub_penalty = 0.5 if is_eq_sub else 0
+                                    accel_boost = payoff_accel * 0.2
+                                    quality = quality * (1 + convexity_boost + accel_boost - eq_sub_penalty)
+                                
+                                # Get risk label - use trader label if in trader mode
+                                if trader_mode_active:
+                                    risk_label, risk_sublabel = get_trader_label(category, thesis, convexity_score, is_eq_sub)
+                                else:
+                                    risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
                                 
                                 spread_candidates.append({
                                     "long": long_call, "short": short_call,
@@ -2152,13 +2363,20 @@ def main():
                                     "prob_max_loss": p_max_loss, "tail_epsilon": tail_eps,
                                     "prob_conf": prob_conf, "liquidity": liquidity, "breakeven": breakeven,
                                     "quality": quality, "slippage_ratio": slippage_ratio,
-                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel
+                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel,
+                                    "convexity_score": convexity_score, "is_eq_sub": is_eq_sub,
+                                    "thesis_category": category, "thesis": thesis, "payoff_accel": payoff_accel
                                 })
                         
                         if spread_candidates:
-                            # RANKING: Sort by QUALITY SCORE (not just EV)
+                            # RANKING: Sort by QUALITY SCORE (convexity-adjusted in trader mode)
                             spread_candidates.sort(key=lambda x: x["quality"], reverse=True)
                             best_spread = spread_candidates[0]
+                            
+                            # In trader mode, reject if best candidate is equity substitute
+                            if trader_mode_active and best_spread.get("is_eq_sub"):
+                                rejection_reasons.append("NO TRADE: Best candidate is equity substitute (linear payoff)")
+                                spread_candidates = []
                             
                             # NO TRADE CHECK
                             no_trade, no_trade_reason = should_recommend_no_trade(
@@ -2176,15 +2394,9 @@ def main():
                                      "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                                 ]
                                 
-                                # Use spread-specific risk label for deep ITM, otherwise standard label
-                                if best_spread.get("is_deep_itm"):
-                                    label = best_spread["risk_label"]
-                                    sublabel = best_spread["risk_sublabel"]
-                                else:
-                                    label, sublabel = get_trade_label(
-                                        best_spread["quality"], best_spread["ev_dollars"]/100,
-                                        best_spread["prob_profit"], best_spread["prob_conf"]
-                                    )
+                                # Use trader-focused label or standard label
+                                label = best_spread.get("risk_label", "✅ ACCEPTABLE")
+                                sublabel = best_spread.get("risk_sublabel", "")
                                 
                                 trade_metrics["ev_dollars"] = best_spread["ev_dollars"] / 100
                                 trade_metrics["ev_per_dollar_risked"] = best_spread["ev_per_risk"]
@@ -2195,6 +2407,11 @@ def main():
                                 trade_metrics["prob_confidence"] = best_spread["prob_conf"]
                                 trade_metrics["tail_epsilon"] = best_spread.get("tail_epsilon", 0.01)
                                 trade_metrics["is_deep_itm"] = best_spread.get("is_deep_itm", False)
+                                trade_metrics["is_eq_sub"] = best_spread.get("is_eq_sub", False)
+                                trade_metrics["convexity_score"] = best_spread.get("convexity_score", 0.5)
+                                trade_metrics["thesis_category"] = best_spread.get("thesis_category", "Directional")
+                                trade_metrics["thesis"] = best_spread.get("thesis", "")
+                                trade_metrics["payoff_accel"] = best_spread.get("payoff_accel", 0.5)
                                 trade_metrics["liquidity_score"] = best_spread["liquidity"]
                                 trade_metrics["quality_score"] = best_spread["quality"]
                                 trade_metrics["trade_label"] = label
@@ -2215,11 +2432,20 @@ def main():
                     
                     elif strategy_type == "Bear Put Spread":
                         spread_candidates = []
+                        trader_mode_active = trader_mode == "Trader (Convexity)"
                         
                         for _, long_put in puts[puts["strike"] >= spot * 0.95].iterrows():
                             for _, short_put in puts[puts["strike"] < long_put["strike"]].iterrows():
                                 if long_put["strike"] - short_put["strike"] > spot * 0.20:
                                     continue
+                                
+                                K_long = long_put["strike"]
+                                K_short = short_put["strike"]
+                                
+                                # TRADER-FOCUSED: Strike proximity check
+                                if trader_mode_active:
+                                    if not check_spread_proximity(K_long, K_short, spot, strike_proximity):
+                                        continue
                                 
                                 exec_debit = long_put["exec_buy"] - short_put["exec_sell"]
                                 width = long_put["strike"] - short_put["strike"]
@@ -2236,11 +2462,32 @@ def main():
                                 if rr_ratio > 10:
                                     continue
                                 
+                                # CONVEXITY CALCULATION
+                                long_gamma = long_put.get("gamma", 0.01)
+                                short_gamma = short_put.get("gamma", 0.005)
+                                long_vega = long_put.get("vega", 0.1)
+                                short_vega = short_put.get("vega", 0.05)
+                                long_delta = long_put.get("delta", -0.5)
+                                short_delta = short_put.get("delta", -0.3)
+                                
+                                convexity_score = calc_spread_convexity(
+                                    long_delta, short_delta, long_gamma, short_gamma, long_vega, short_vega
+                                )
+                                net_gamma = (long_gamma or 0) - (short_gamma or 0)
+                                net_vega = (long_vega or 0) - (short_vega or 0)
+                                is_eq_sub = is_equity_substitute(long_delta, short_delta, net_gamma, net_vega)
+                                
+                                if trader_mode_active and require_convexity:
+                                    if is_eq_sub or convexity_score < 0.10:
+                                        continue
+                                
+                                category, thesis = classify_thesis(
+                                    strategy_type, direction, spot, K_long, K_short
+                                )
+                                
                                 # ========================================
                                 # VERTICAL PROBABILITY DEFINITIONS (EXACT)
                                 # ========================================
-                                K_long = long_put["strike"]
-                                K_short = short_put["strike"]
                                 breakeven = K_long - exec_debit
                                 
                                 # P(Max Profit) = P(S_T <= K_short) - probability spot finishes below short strike
@@ -2293,12 +2540,25 @@ def main():
                                 slippage_ratio = total_slippage / max_profit if max_profit > 0 else 1
                                 
                                 complexity_adj = 2.5 if deep_itm else 2
-                                quality = calc_trade_quality_score(
-                                    ev=ev/100, max_loss=max_loss, prob_profit=prob_profit,
-                                    prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
-                                )
                                 
-                                risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
+                                # Trader-adjusted quality
+                                if trader_mode_active:
+                                    convexity_boost = convexity_score * 0.3
+                                    eq_sub_penalty = 0.5 if is_eq_sub else 0
+                                    quality = calc_trade_quality_score(
+                                        ev=ev/100, max_loss=max_loss, prob_profit=prob_profit,
+                                        prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
+                                    ) * (1 + convexity_boost - eq_sub_penalty)
+                                else:
+                                    quality = calc_trade_quality_score(
+                                        ev=ev/100, max_loss=max_loss, prob_profit=prob_profit,
+                                        prob_confidence=prob_conf, liquidity_score=liquidity, complexity=complexity_adj
+                                    )
+                                
+                                if trader_mode_active:
+                                    risk_label, risk_sublabel = get_trader_label(category, thesis, convexity_score, is_eq_sub)
+                                else:
+                                    risk_label, risk_sublabel = get_spread_risk_label(p_max_profit, p_max_loss, deep_itm, tail_eps)
                                 
                                 spread_candidates.append({
                                     "long": long_put, "short": short_put,
@@ -2309,14 +2569,20 @@ def main():
                                     "prob_max_loss": p_max_loss, "tail_epsilon": tail_eps,
                                     "prob_conf": prob_conf, "liquidity": liquidity, "breakeven": breakeven,
                                     "quality": quality, "slippage_ratio": slippage_ratio,
-                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel
+                                    "is_deep_itm": deep_itm, "risk_label": risk_label, "risk_sublabel": risk_sublabel,
+                                    "convexity_score": convexity_score, "is_eq_sub": is_eq_sub,
+                                    "thesis_category": category, "thesis": thesis
                                 })
                         
                         if spread_candidates:
                             spread_candidates.sort(key=lambda x: x["quality"], reverse=True)
                             best_spread = spread_candidates[0]
                             
-                            if best_spread["max_loss"] * 100 <= max_risk:
+                            # Reject if equity substitute in trader mode
+                            if trader_mode_active and best_spread.get("is_eq_sub"):
+                                rejection_reasons.append("NO TRADE: Best candidate is equity substitute (linear payoff)")
+                                spread_candidates = []
+                            elif best_spread["max_loss"] * 100 <= max_risk:
                                 legs = [
                                     {"type": "PUT", "strike": best_spread["long"]["strike"], "direction": "LONG",
                                      "bid": best_spread["long"]["bid"], "ask": best_spread["long"]["ask"], "exec_price": best_spread["long"]["exec_buy"]},
@@ -2324,14 +2590,8 @@ def main():
                                      "bid": best_spread["short"]["bid"], "ask": best_spread["short"]["ask"], "exec_price": best_spread["short"]["exec_sell"]}
                                 ]
                                 
-                                if best_spread.get("is_deep_itm"):
-                                    label = best_spread["risk_label"]
-                                    sublabel = best_spread["risk_sublabel"]
-                                else:
-                                    label, sublabel = get_trade_label(
-                                        best_spread["quality"], best_spread["ev_dollars"]/100,
-                                        best_spread["prob_profit"], best_spread["prob_conf"]
-                                    )
+                                label = best_spread.get("risk_label", "✅ ACCEPTABLE")
+                                sublabel = best_spread.get("risk_sublabel", "")
                                 
                                 trade_metrics["ev_dollars"] = best_spread["ev_dollars"]
                                 trade_metrics["ev_per_dollar_risked"] = best_spread["ev_per_risk"]
@@ -2342,6 +2602,10 @@ def main():
                                 trade_metrics["prob_confidence"] = best_spread["prob_conf"]
                                 trade_metrics["tail_epsilon"] = best_spread.get("tail_epsilon", 0.01)
                                 trade_metrics["is_deep_itm"] = best_spread.get("is_deep_itm", False)
+                                trade_metrics["is_eq_sub"] = best_spread.get("is_eq_sub", False)
+                                trade_metrics["convexity_score"] = best_spread.get("convexity_score", 0.5)
+                                trade_metrics["thesis_category"] = best_spread.get("thesis_category", "Directional")
+                                trade_metrics["thesis"] = best_spread.get("thesis", "")
                                 trade_metrics["liquidity_score"] = best_spread["liquidity"]
                                 trade_metrics["quality_score"] = best_spread["quality"]
                                 trade_metrics["trade_label"] = label
@@ -2353,10 +2617,12 @@ def main():
                                 trade_metrics["breakeven"] = best_spread["breakeven"]
                                 
                                 trade_viable = True
-                            else:
+                            elif best_spread["max_loss"] * 100 > max_risk:
                                 rejection_reasons.append(f"Best spread exceeds max risk (${best_spread['max_loss']*100:.0f} > ${max_risk})")
+                            else:
+                                rejection_reasons.append("Best spread has EV ≤ $0")
                         else:
-                            rejection_reasons.append("No bear put spreads with EV > $0 after execution costs")
+                            rejection_reasons.append("No bear put spreads passed quality filters")
                     
                     # ============ CREDIT SPREADS (EV-Primary) ============
                     elif strategy_type == "Bull Put Spread (Credit)":
@@ -2829,6 +3095,41 @@ def main():
 {deep_itm_warning}
 </div>""", unsafe_allow_html=True)
                         
+                        # TRADER-FOCUSED THESIS & CONVEXITY DISPLAY
+                        thesis_cat = trade_metrics.get("thesis_category", "")
+                        thesis = trade_metrics.get("thesis", "")
+                        convexity = trade_metrics.get("convexity_score", 0)
+                        payoff_accel = trade_metrics.get("payoff_accel", 0)
+                        is_eq_sub = trade_metrics.get("is_eq_sub", False)
+                        
+                        if thesis:
+                            conv_color = "#10B981" if convexity > 0.4 else "#F59E0B" if convexity > 0.2 else "#EF4444"
+                            accel_color = "#10B981" if payoff_accel > 0.5 else "#F59E0B" if payoff_accel > 0.3 else "#94A3B8"
+                            
+                            eq_sub_warning = ""
+                            if is_eq_sub:
+                                eq_sub_warning = '<div style="background: rgba(239,68,68,0.2); padding: 8px; border-radius: 6px; margin-top: 10px; font-size: 0.75rem; color: #FCA5A5;">⚠️ Equity substitute detected: Near-linear payoff, low gamma/vega. Consider ATM alternatives for convexity.</div>'
+                            
+                            st.markdown(f"""<div style="background: rgba(59,130,246,0.1); padding: 14px; border-radius: 10px; margin: 12px 0; border-left: 3px solid #3B82F6;">
+<div style="font-size: 0.75rem; color: #64748B; text-transform: uppercase; margin-bottom: 6px;">Trade Thesis</div>
+<div style="font-size: 0.95rem; color: #E2E8F0; font-weight: 500;">{thesis}</div>
+<div style="display: flex; gap: 20px; margin-top: 12px;">
+<div>
+<span style="font-size: 0.7rem; color: #94A3B8;">Category:</span>
+<span style="font-size: 0.85rem; color: #60A5FA; margin-left: 6px;">{thesis_cat}</span>
+</div>
+<div>
+<span style="font-size: 0.7rem; color: #94A3B8;">Convexity:</span>
+<span style="font-size: 0.85rem; color: {conv_color}; margin-left: 6px;">{convexity:.0%}</span>
+</div>
+<div>
+<span style="font-size: 0.7rem; color: #94A3B8;">Payoff Acceleration:</span>
+<span style="font-size: 0.85rem; color: {accel_color}; margin-left: 6px;">{payoff_accel:.0%}</span>
+</div>
+</div>
+{eq_sub_warning}
+</div>""", unsafe_allow_html=True)
+                        
                         # TRADE VIABILITY ASSESSMENT
                         viability_items = []
                         if ev > 0.5:
@@ -2841,6 +3142,12 @@ def main():
                             viability_items.append("⚡ Acceptable probability")
                         else:
                             viability_items.append("⚠️ Low win rate")
+                        if convexity >= 0.4:
+                            viability_items.append("✅ Strong upside convexity")
+                        elif convexity >= 0.2:
+                            viability_items.append("⚡ Moderate convexity")
+                        elif convexity < 0.15:
+                            viability_items.append("⚠️ Low convexity - near-linear payoff")
                         if prob_conf >= 0.7:
                             viability_items.append("✅ High confidence estimate")
                         elif prob_conf >= 0.5:
@@ -2940,39 +3247,39 @@ def main():
                         
                     elif rejection_reasons:
                         # Check if this is an explicit NO TRADE recommendation
-                        is_no_trade = any("NO TRADE RECOMMENDED" in r for r in rejection_reasons)
+                        is_no_trade = any("NO TRADE" in r for r in rejection_reasons)
+                        is_trader_reject = any(x in " ".join(rejection_reasons).lower() for x in ["equity substitute", "convexity", "linear payoff"])
                         
-                        if is_no_trade:
-                            # EXPLICIT NO TRADE - This is the CORRECT output
-                            st.markdown("""
-                            <div style="background: linear-gradient(135deg, #1E3A5F, #1E40AF); color: white; padding: 20px; border-radius: 12px; margin: 12px 0; border: 2px solid #3B82F6;">
-                                <h3 style="margin: 0 0 12px 0; color: #60A5FA;">🛑 NO TRADE RECOMMENDED</h3>
-                                <p style="color: #93C5FD; font-size: 0.95rem; margin: 0;">
-                                    <strong>This is the correct recommendation.</strong><br>
-                                    The system is now functioning as a capital allocator, not an idea generator.
-                                    When conditions don't justify a trade, the right answer is to not trade.
-                                </p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                        if is_no_trade or is_trader_reject:
+                            # Determine header based on rejection type
+                            header = "🛑 NO TRADE MEETS TRADER-GRADE REQUIREMENTS" if is_trader_reject else "🛑 NO TRADE RECOMMENDED"
+                            
+                            st.markdown(f"""
+<div style="background: linear-gradient(135deg, #1E3A5F, #1E40AF); color: white; padding: 20px; border-radius: 12px; margin: 12px 0; border: 2px solid #3B82F6;">
+<h3 style="margin: 0 0 12px 0; color: #60A5FA;">{header}</h3>
+<p style="color: #93C5FD; font-size: 0.95rem; margin: 0;">
+<strong>This is the correct recommendation.</strong><br>
+Trader mode requires non-linear payoffs with meaningful convexity.
+Equity-substitute and deep-ITM structures are rejected by default.
+</p>
+</div>""", unsafe_allow_html=True)
                             
                             st.markdown("**Why No Trade:**")
                             for reason in rejection_reasons:
-                                if "NO TRADE RECOMMENDED" in reason:
-                                    st.info(f"📋 {reason.replace('NO TRADE RECOMMENDED: ', '')}")
-                                else:
-                                    st.caption(f"• {reason}")
+                                clean = reason.replace('NO TRADE RECOMMENDED: ', '').replace('NO TRADE: ', '')
+                                st.info(f"📋 {clean}")
                             
                             st.markdown("""
-                            <div style="background: rgba(59,130,246,0.1); padding: 12px; border-radius: 8px; margin: 12px 0;">
-                                <p style="color: #64748B; font-size: 0.85rem; margin: 0;">
-                                    <strong>What this means for you:</strong><br>
-                                    • Your capital is protected<br>
-                                    • The system rejected "sexy but stupid" trades<br>
-                                    • Waiting for better conditions is the optimal strategy<br>
-                                    • Try different expiration, strategy type, or underlying
-                                </p>
-                            </div>
-                            """, unsafe_allow_html=True)
+<div style="background: rgba(59,130,246,0.1); padding: 12px; border-radius: 8px; margin: 12px 0;">
+<p style="color: #64748B; font-size: 0.85rem; margin: 0;">
+<strong>Trader Mode - Rejection Criteria:</strong><br>
+• Trades require upside convexity (gamma/vega exposure)<br>
+• Equity-substitute structures (linear payoffs) blocked<br>
+• At least one strike must be within ±30% of spot<br>
+• Deep ITM spreads de-prioritized<br><br>
+<em>To allow equity-like structures, switch to "Capital Substitution" mode.</em>
+</p>
+</div>""", unsafe_allow_html=True)
                         else:
                             # Regular rejection (not explicit NO TRADE)
                             st.error("❌ No trade offers positive expected value under current assumptions")
