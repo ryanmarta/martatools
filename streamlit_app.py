@@ -5780,25 +5780,20 @@ Equity-substitute and deep-ITM structures are rejected by default.
         with col3:
             risk_tolerance = st.selectbox("Risk Tolerance", ["Conservative", "Moderate", "Aggressive"], index=1)
         
-        # Elite universe of liquid, optionable stocks
+        # Elite universe of liquid, optionable stocks (optimized for speed)
         PICKER_UNIVERSE = [
-            # Mega-Cap Tech
-            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "ORCL", "ADBE",
-            "CRM", "AMD", "INTC", "QCOM", "TXN", "IBM", "MU", "NOW", "UBER", "NFLX",
+            # Mega-Cap Tech (most liquid)
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "AMD", "NFLX",
             # Financials
-            "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "AXP", "BLK", "C", "SCHW", "CME",
+            "JPM", "BAC", "GS", "V", "MA", "BLK",
             # Healthcare
-            "UNH", "JNJ", "LLY", "MRK", "ABBV", "PFE", "TMO", "AMGN", "ISRG", "MDT",
+            "UNH", "JNJ", "LLY", "MRK", "ABBV", "PFE",
             # Consumer
-            "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "PG", "KO", "PEP",
-            # Industrial
-            "CAT", "DE", "HON", "GE", "UNP", "UPS", "BA", "LMT", "RTX",
-            # Energy
-            "XOM", "CVX", "COP", "SLB", "EOG", "OXY",
-            # Growth / Tech
-            "SNOW", "NET", "CRWD", "DDOG", "ZS", "PANW", "SHOP", "SQ", "COIN",
-            # High Beta
-            "PLTR", "RIVN", "LCID", "MSTR", "MARA", "DKNG", "ROKU", "SNAP", "PINS",
+            "WMT", "COST", "HD", "MCD", "NKE", "KO",
+            # Industrial & Energy
+            "CAT", "DE", "GE", "XOM", "CVX",
+            # Growth / High Beta
+            "SNOW", "NET", "CRWD", "PANW", "PLTR", "COIN", "MSTR", "DKNG",
         ]
         
         @st.cache_data(ttl=600, show_spinner=False)
@@ -5806,36 +5801,53 @@ Equity-substitute and deep-ITM structures are rejected by default.
             """Run comprehensive quant analysis on universe"""
             results = []
             
-            # Batch download data
+            # Batch download data - smaller batches to avoid timeouts
+            price_data = None
             try:
-                price_data = yf.download(tickers + ["SPY"], period="1y", progress=False)
-            except:
+                price_data = yf.download(tickers + ["SPY"], period="1y", progress=False, threads=False)
+            except Exception as e:
+                st.warning(f"Batch download failed, trying smaller batches...")
+                try:
+                    # Try in smaller batches
+                    price_data = yf.download(tickers[:30] + ["SPY"], period="6mo", progress=False, threads=False)
+                except:
+                    return pd.DataFrame()
+            
+            if price_data is None or price_data.empty:
                 return pd.DataFrame()
             
             spy_closes = None
-            if isinstance(price_data.columns, pd.MultiIndex):
-                try:
+            try:
+                if isinstance(price_data.columns, pd.MultiIndex):
                     spy_closes = price_data["Close"]["SPY"].dropna()
-                except:
-                    pass
+                else:
+                    spy_closes = price_data["Close"].dropna()
+            except:
+                pass
             
             for ticker in tickers:
                 try:
-                    tk = yf.Ticker(ticker)
-                    info = tk.info
-                    
-                    # Get price series
+                    # Get price series first (cheaper than API call)
                     if isinstance(price_data.columns, pd.MultiIndex):
+                        if ticker not in price_data["Close"].columns:
+                            continue
                         closes = price_data["Close"][ticker].dropna()
                         volumes = price_data["Volume"][ticker].dropna()
                     else:
                         closes = price_data["Close"].dropna()
                         volumes = price_data["Volume"].dropna()
                     
-                    if len(closes) < 60:
+                    if len(closes) < 20:  # Reduced requirement
                         continue
                     
                     current_price = closes.iloc[-1]
+                    
+                    # Get info with timeout protection
+                    try:
+                        tk = yf.Ticker(ticker)
+                        info = tk.info or {}
+                    except:
+                        info = {}
                     
                     # ========== FUNDAMENTAL SIGNALS ==========
                     # Valuation
@@ -6125,7 +6137,7 @@ Equity-substitute and deep-ITM structures are rejected by default.
                         "Alpha": alpha,
                         "Style": primary_style,
                         "Price": current_price,
-                        "Mom20": mom_score if 'mom_score' in dir() else momentum_score,
+                        "Mom20": momentum_score,
                         "Quality": quality_score,
                         "Value": value_score,
                         "Growth": growth_score,
@@ -6294,7 +6306,17 @@ Equity-substitute and deep-ITM structures are rejected by default.
                     
                 else:
                     progress_bar.empty()
-                    st.error("Analysis failed. Please try again.")
+                    st.warning("⚠️ Analysis returned no results. This can happen due to API rate limits.")
+                    st.info("**Try again in a few seconds** — yfinance sometimes throttles requests on Streamlit Cloud.")
+                    
+                    # Offer a quick retry with fewer stocks
+                    if st.button("🔄 Quick Retry (Top 10 Stocks Only)"):
+                        quick_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "JPM", "V", "UNH"]
+                        with st.spinner("Retrying with smaller set..."):
+                            df_retry = run_quant_analysis(quick_tickers, style_pref, time_horizon, risk_tolerance)
+                            if df_retry is not None and not df_retry.empty:
+                                st.success(f"Found {len(df_retry)} stocks!")
+                                st.dataframe(df_retry[["Ticker", "Alpha", "Style", "Price", "Thesis"]].head(5))
         else:
             st.info("👃 **Click above to find your 5 best picks** based on comprehensive quant analysis")
             
