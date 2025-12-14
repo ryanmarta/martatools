@@ -948,10 +948,28 @@ def main():
             hist = hydra.get_history(ticker)
 
         if spot is None:
-            st.error("❌ Unable to retrieve market data. Please check the ticker symbol or your internet connection.")
-            with st.expander("🔧 Debug Info"):
+            st.error(f"❌ **Unable to fetch data for ticker: {ticker}**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.warning("""
+                **Possible Reasons:**
+                - Ticker doesn't exist or is delisted
+                - No market data available
+                - Network/API issue
+                """)
+            
+            with col2:
+                st.info("""
+                **Try These Tickers:**
+                - **Tech**: AAPL, MSFT, NVDA, TSLA
+                - **ETFs**: SPY, QQQ, DIA, IWM
+                - **Other**: META, AMZN, GOOGL, AMD
+                """)
+            
+            with st.expander("🔧 Technical Debug Info"):
                 st.code(hydra.get_debug_info())
-                st.info("Try: pip install --upgrade yfinance")
+                st.caption("💡 **Tip**: Run `pip install --upgrade yfinance` in your terminal")
             return
         if hist is None or hist.empty:
             st.warning("⚠️ Limited historical data available. Some features may be restricted.")
