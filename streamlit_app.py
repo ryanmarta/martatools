@@ -98,9 +98,9 @@ st.markdown(
             display: none !important;
         }
         
-        /* HEADINGS - DARK AND BOLD */
+        /* HEADINGS - PURE BLACK */
         h1, h2, h3, h4, h5, h6 {
-            color: #111827 !important;
+            color: #000000 !important;
             font-weight: 700 !important;
         }
         
@@ -108,16 +108,16 @@ st.markdown(
         h2 { font-size: 1.875rem !important; }
         h3 { font-size: 1.5rem !important; }
         
-        /* TEXT - HIGH CONTRAST */
-        p, li, span, div {
-            color: #374151 !important;
+        /* TEXT - PURE BLACK */
+        p, li, span, div, [class*="css"] {
+            color: #000000 !important;
         }
         
-        /* METRIC LABELS - ALWAYS VISIBLE */
+        /* METRIC LABELS - BLACK */
         div[data-testid="stMetricLabel"] {
             font-size: 0.95rem !important;
             font-weight: 700 !important;
-            color: #1F2937 !important;
+            color: #000000 !important;
             margin-bottom: 6px !important;
             display: block !important;
             visibility: visible !important;
@@ -128,24 +128,25 @@ st.markdown(
         div[data-testid="stMetricValue"] {
             font-size: 1.75rem !important;
             font-weight: 800 !important;
-            color: #111827 !important;
+            color: #000000 !important;
         }
         
         div[data-testid="stMetricDelta"] {
             font-size: 0.875rem !important;
             font-weight: 600 !important;
+            color: #000000 !important;
         }
         
-        /* INPUT FIELDS - DARK LABELS */
+        /* INPUT FIELDS - BLACK LABELS */
         label {
-            color: #111827 !important;
+            color: #000000 !important;
             font-weight: 600 !important;
             font-size: 0.95rem !important;
         }
         
         input, textarea, select {
             font-size: 1rem !important;
-            color: #111827 !important;
+            color: #000000 !important;
         }
         
         /* BUTTONS - HIGH CONTRAST */
@@ -981,6 +982,74 @@ def main():
             # Layer 4: Jump Diffusion Tail Risk
             tail_risk, tail_score, jump_prob = qs.run_layer4_jump_diffusion()
             
+            # ==========================================
+            # RYAN MODEL (Volatility Squeeze Analysis)
+            # ==========================================
+            
+            # Calculate Ryan Model metrics
+            close = hist['Close']
+            volume = hist['Volume'] if 'Volume' in hist.columns else pd.Series([0] * len(hist))
+            
+            # 1. Squeeze Detection (Bollinger Bandwidth)
+            window = 20
+            sma = close.rolling(window).mean()
+            std = close.rolling(window).std()
+            upper_band = sma + (2 * std)
+            lower_band = sma - (2 * std)
+            bandwidth = (upper_band - lower_band) / sma
+            current_bw = bandwidth.iloc[-1] if len(bandwidth) > 0 else 0.2
+            squeeze_threshold = 0.20
+            is_squeeze = current_bw < squeeze_threshold
+            squeeze_status = "COILED" if is_squeeze else "LOOSE"
+            squeeze_score = max(0, (squeeze_threshold - current_bw) / squeeze_threshold * 100) if is_squeeze else 0
+            
+            # 2. Trend & Momentum
+            curr_price = close.iloc[-1]
+            trend = "BULLISH" if curr_price > sma.iloc[-1] else "BEARISH"
+            ema_9 = close.ewm(span=9, adjust=False).mean()
+            ema_21 = close.ewm(span=21, adjust=False).mean()
+            momentum = "BULLISH" if ema_9.iloc[-1] > ema_21.iloc[-1] else "BEARISH"
+            
+            # 3. Volume Velocity
+            if len(volume) > 3:
+                v3 = volume.rolling(3).mean().iloc[-1]
+                v30 = volume.rolling(30).mean().iloc[-1] if len(volume) > 30 else v3
+                v_status = "Speeding Up" if v3 > v30 else "Slowing Down"
+                v_score = min(100, (v3 / v30 * 100)) if v30 > 0 else 50
+            else:
+                v_status = "Unknown"
+                v_score = 50
+            
+            # 4. Relative Strength vs SPY
+            try:
+                spy_data = yf.download("SPY", period="60d", progress=False)['Close']
+                ticker_60d_return = (close.iloc[-1] / close.iloc[-60] - 1) * 100 if len(close) > 60 else 0
+                spy_60d_return = (spy_data.iloc[-1] / spy_data.iloc[-60] - 1) * 100 if len(spy_data) > 60 else 0
+                rs_rating = ticker_60d_return - spy_60d_return
+                rs_status = "Outperforming" if rs_rating > 0 else "Underperforming"
+            except:
+                rs_rating = 0
+                rs_status = "N/A"
+            
+            # 5. Confidence Score (0-100)
+            confidence = 0
+            # Trend alignment (35 points)
+            if trend == momentum:
+                confidence += 35
+            else:
+                confidence += 15
+            # Squeeze depth (25 points)
+            if is_squeeze:
+                confidence += 25
+            # Volume velocity (20 points)
+            if v_status == "Speeding Up":
+                confidence += 20
+            # Relative strength (20 points)
+            if rs_rating > 0:
+                confidence += 20
+            
+            confidence = min(100, max(0, confidence))
+            
             st.markdown("---")
             
             # ==========================================
@@ -1147,6 +1216,39 @@ def main():
                         """, unsafe_allow_html=True)
                     else:
                         st.info("N/A")
+            
+            st.markdown("---")
+            
+            # --- RYAN MODEL METRICS ---
+            st.markdown("#### 📊 Ryan Model Output")
+            st.caption("Volatility Squeeze + Momentum + Volume Velocity + Relative Strength")
+            
+            rm1, rm2, rm3, rm4, rm5, rm6 = st.columns(6)
+            
+            with rm1:
+                st.metric("Squeeze", squeeze_status, 
+                         delta=f"{current_bw:.3f}" if is_squeeze else "Normal",
+                         delta_color="normal" if is_squeeze else "off")
+            
+            with rm2:
+                trend_color = "normal" if trend == "BULLISH" else "inverse"
+                st.metric("Trend", trend, delta_color=trend_color)
+            
+            with rm3:
+                mom_color = "normal" if momentum == "BULLISH" else "inverse"
+                st.metric("Momentum", momentum, delta_color=mom_color)
+            
+            with rm4:
+                vol_color = "normal" if v_status == "Speeding Up" else "inverse"
+                st.metric("Volume", v_status, delta_color=vol_color)
+            
+            with rm5:
+                rs_color = "normal" if rs_rating > 0 else "inverse"
+                st.metric("RS Rating", f"{rs_rating:.1f}%", delta=rs_status, delta_color=rs_color)
+            
+            with rm6:
+                conf_color = "normal" if confidence >= 70 else "inverse" if confidence < 50 else "off"
+                st.metric("Confidence", f"{confidence}%", delta_color=conf_color)
             
             st.markdown("---")
             
