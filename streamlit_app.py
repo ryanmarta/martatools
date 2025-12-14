@@ -122,6 +122,23 @@ st.markdown(
         .stRadio > div > label > div:first-child {
             display: none !important;
         }
+        
+        /* ENSURE METRIC LABELS ARE READABLE */
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.875rem !important;
+            font-weight: 600 !important;
+            color: #475569 !important;
+            margin-bottom: 4px !important;
+            display: block !important;
+            visibility: visible !important;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.5rem !important;
+            font-weight: 700 !important;
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.75rem !important;
+        }
     </style>
 """,
     unsafe_allow_html=True,
@@ -912,33 +929,141 @@ def main():
             with st.spinner("Analyzing Macro Regime..."):
                 regime, macro_score, macro_df, horsemen = qs.run_layer1_regime()
             
+            # --- CALCULATE TAIL RISK ---
+            tail_risk, tail_score, jump_prob = qs.run_layer4_jump_diffusion()
+            
+            st.markdown("---")
+            
+            # ==========================================
+            # STRATEGY COMMAND CENTER (Top Priority)
+            # ==========================================
+            st.markdown("### 🎯 STRATEGY: Entry, Exit & Risk Management")
+            
+            # Calculate strategy based on all layers
+            current_price = spot
+            kalman_true_value = kalman_df['Kalman'].iloc[-1] if kalman_df is not None and not kalman_df.empty else spot
+            
+            # Entry logic
+            should_enter = False
+            entry_rationale = []
+            risk_level = "HIGH"
+            
+            if regime == "BULL":
+                entry_rationale.append("✅ Bullish macro environment (Four Horsemen)")
+                if kalman_z < 2.0:
+                    entry_rationale.append("✅ Fair valuation (Kalman Z < 2.0)")
+                    if tail_risk in ["LOW", "MEDIUM"]:
+                        entry_rationale.append(f"✅ Acceptable tail risk ({tail_risk})")
+                        should_enter = True
+                        risk_level = "LOW" if tail_risk == "LOW" else "MEDIUM"
+                    else:
+                        entry_rationale.append(f"⚠️ High tail risk ({tail_risk})")
+                else:
+                    entry_rationale.append("⛔ Overextended (Kalman Z > 2.0)")
+            elif regime == "BEAR":
+                entry_rationale.append("🛑 Bearish macro - WAIT for regime shift")
+            else:
+                entry_rationale.append("⚖️ Neutral macro - Selective entry only")
+            
+            # Calculate levels
+            if should_enter:
+                # Entry: Current price if fair, or wait for Kalman fair value
+                entry_price = current_price if kalman_z < 1.5 else kalman_true_value
+                
+                # Stop loss: 2 ATR or 5% below entry, whichever is tighter
+                if 'High' in kalman_df.columns and 'Low' in kalman_df.columns:
+                    recent_high = kalman_df['High'].tail(20).max()
+                    recent_low = kalman_df['Low'].tail(20).min()
+                    atr_proxy = (recent_high - recent_low) / 20
+                    stop_distance = min(atr_proxy * 2, entry_price * 0.05)
+                else:
+                    stop_distance = entry_price * 0.05
+                
+                stop_loss = entry_price - stop_distance
+                
+                # Take profit: Based on Kalman bands
+                if kalman_df is not None:
+                    upper_band = kalman_df['Kalman'].iloc[-1] + (2 * kalman_df['Res_Std'].iloc[-1])
+                    target_1 = kalman_true_value + (kalman_true_value - current_price) * 1.5
+                    target_2 = upper_band
+                else:
+                    target_1 = entry_price * 1.05
+                    target_2 = entry_price * 1.10
+                
+                # Position sizing from GARCH
+                position_size_pct = min(100, cap * 0.01 * sizing * kelly)  # Max 1% risk, adjusted by GARCH
+                shares = int(position_size_pct / entry_price)
+                
+                strat_color = "#10B981"
+                strat_decision = "✅ ENTER LONG"
+            else:
+                entry_price = "WAIT"
+                stop_loss = "N/A"
+                target_1, target_2 = "N/A", "N/A"
+                shares = 0
+                position_size_pct = 0
+                strat_color = "#EF4444"
+                strat_decision = "🛑 DO NOT ENTER"
+            
+            # Display Strategy Box
+            scol1, scol2 = st.columns([2, 1])
+            
+            with scol1:
+                st.markdown(f"""
+                <div class="signal-box" style="border-left-color: {strat_color}; background: {'#ECFDF5' if should_enter else '#FEF2F2'};">
+                    <h2 style="margin:0; color:{strat_color};">{strat_decision}</h2>
+                    <p style="margin:10px 0 0 0; line-height:1.6;">
+                        {'<br/>'.join(entry_rationale)}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with scol2:
+                st.markdown(f"""
+                <div style="border:1px solid #E2E8F0; padding:15px; border-radius:8px; background:#F8FAFC;">
+                    <div style="margin-bottom:10px;">
+                        <strong>Entry:</strong> ${entry_price if isinstance(entry_price, str) else f'{entry_price:.2f}'}<br/>
+                        <strong>Stop Loss:</strong> ${stop_loss if isinstance(stop_loss, str) else f'{stop_loss:.2f}'}<br/>
+                        <strong>Target 1:</strong> ${target_1 if isinstance(target_1, str) else f'{target_1:.2f}'}<br/>
+                        <strong>Target 2:</strong> ${target_2 if isinstance(target_2, str) else f'{target_2:.2f}'}
+                    </div>
+                    <div style="border-top:1px solid #E2E8F0; padding-top:10px;">
+                        <strong>Position Size:</strong> {shares} shares (${position_size_pct:.0f})<br/>
+                        <strong>GARCH Sizing:</strong> {sizing:.1f}x<br/>
+                        <strong>Risk Level:</strong> {risk_level}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
             # --- FOUR HORSEMEN DISPLAY (The Black Box) ---
-            st.markdown("#### \ud83d\udc34 The Four Horsemen (Institutional Flow Indicators)")
+            st.markdown("#### 🐴 The Four Horsemen (Institutional Flow Indicators)")
             st.caption("The invisible ratios that drive smart money - we don't care about price, we care about the environment.")
             
             h1, h2, h3, h4 = st.columns(4)
             
             horsemen_config = {
                 'Credit': {
-                    'label': '\ud83c\udfdb\ufe0f Credit',
+                    'label': 'Credit',
                     'subtitle': 'JNK / LQD',
                     'tooltip': 'Risk ON (rising) vs Risk OFF (falling)',
                     'col': h1
                 },
                 'Consumer': {
-                    'label': '\ud83d\udecd\ufe0f Consumer',
+                    'label': 'Consumer',
                     'subtitle': 'XLY / XLP',
                     'tooltip': 'iPads (Bullish) vs Toothpaste (Bearish)',
                     'col': h2
                 },
                 'Growth': {
-                    'label': '\ud83d\udcc8 Rate/Growth',
+                    'label': 'Rate/Growth',
                     'subtitle': 'QQQ / TLT',
                     'tooltip': 'Tech (Growth) vs Bonds (Duration)',
                     'col': h3
                 },
                 'Fear': {
-                    'label': '\ud83e\ude99 Inflation',
+                    'label': 'Inflation',
                     'subtitle': 'SPY / GLD',
                     'tooltip': 'Stocks (Risk) vs Gold (Safety)',
                     'col': h4
@@ -1239,6 +1364,7 @@ def main():
                 st.caption(f"📅 Data as of: {date_str}")
 
         # --- INDICES TICKER BAR ---
+        st.markdown("### 📊 Market Indices")
         if indices_data:
             cols = st.columns(len(indices_data))
             for i, (name, data) in enumerate(indices_data.items()):
