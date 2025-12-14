@@ -969,46 +969,55 @@ def main():
 
         @st.cache_data(ttl=300, show_spinner=False)
         def fetch_news():
-            """Fetch news via RSS feeds - more reliable than yfinance API."""
+            """Fetch news from multiple high-quality RSS feeds with improved sentiment analysis."""
             import re
             news_items = []
             
-            # Yahoo Finance RSS feeds
+            # Diverse RSS feeds for better coverage
             rss_urls = [
-                ("https://finance.yahoo.com/rss/topstories", "Market"),
-                ("https://finance.yahoo.com/rss/stock-market-news", "Stocks"),
+                ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC"),
+                ("https://www.marketwatch.com/rss/marketpulse", "MarketWatch"),
+                ("https://finance.yahoo.com/rss/topstories", "Yahoo"),
+                ("https://news.google.com/rss/search?q=stock+market+when:1d&hl=en-US&gl=US&ceid=US:en", "Google"),
             ]
             
-            for url, category in rss_urls:
+            # Enhanced sentiment keywords
+            positive = ["surge", "jump", "rally", "gain", "gains", "rise", "rises", "soar", "beat", "beats", 
+                       "record", "high", "highs", "bull", "bullish", "growth", "profit", "profits", 
+                       "buy", "upgrade", "boom", "strength", "strong", "outperform", "breakout"]
+            negative = ["fall", "falls", "drop", "drops", "crash", "plunge", "plunges", "sink", "sinks",
+                       "miss", "misses", "low", "lows", "bear", "bearish", "loss", "losses", "fear", 
+                       "sell", "cut", "cuts", "down", "decline", "declines", "warn", "warning", "slump", 
+                       "tumble", "tumbles", "weak", "weakness", "underperform"]
+            
+            for url, source in rss_urls:
                 try:
                     response = requests.get(url, timeout=5, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                     })
                     if response.status_code == 200:
                         content = response.text
-                        
-                        # Simple XML parsing without external library
                         items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
                         
-                        for item_xml in items[:6]:
-                            title_match = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>', item_xml)
+                        for item_xml in items[:4]:  # Limit per source
+                            # Extract title
+                            title_match = re.search(r'<title><!\\[CDATA\\[(.*?)\\]\\]></title>|<title>(.*?)</title>', item_xml)
                             link_match = re.search(r'<link>(.*?)</link>', item_xml)
                             
                             title = ""
                             if title_match:
                                 title = title_match.group(1) or title_match.group(2) or ""
                             
-                            link = link_match.group(1) if link_match else "https://finance.yahoo.com"
+                            # Clean HTML entities
+                            title = re.sub(r'<[^>]+>', '', title).strip()
+                            link = link_match.group(1) if link_match else f"https://{source.lower()}.com"
                             
                             if not title or len(title) < 10:
                                 continue
                             
-                            # Sentiment scoring
-                            sentiment = 0
-                            positive = ["surge", "jump", "rally", "gain", "rise", "soar", "beat", "record", "high", "bull", "growth", "profit", "buy", "upgrade", "boom"]
-                            negative = ["fall", "drop", "crash", "plunge", "sink", "miss", "low", "bear", "loss", "fear", "sell", "cut", "down", "warn", "slump", "tumble"]
-                            
+                            # Calculate sentiment score
                             title_lower = title.lower()
+                            sentiment = 0
                             for word in positive:
                                 if word in title_lower:
                                     sentiment += 1
@@ -1017,65 +1026,20 @@ def main():
                                     sentiment -= 1
                             
                             news_items.append({
-                                "title": title.strip(),
-                                "publisher": "Yahoo Finance",
-                                "link": link.strip(),
-                                "time": len(news_items),  # Use order as proxy
-                                "sentiment": sentiment,
-                                "ticker": category
-                            })
-                except Exception:
-                    pass
-            
-            # Fallback: Try Google Finance RSS
-            if len(news_items) < 3:
-                try:
-                    goog_url = "https://news.google.com/rss/search?q=stock+market&hl=en-US&gl=US&ceid=US:en"
-                    response = requests.get(goog_url, timeout=5, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
-                    })
-                    if response.status_code == 200:
-                        content = response.text
-                        items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
-                        
-                        for item_xml in items[:8]:
-                            title_match = re.search(r'<title>(.*?)</title>', item_xml)
-                            link_match = re.search(r'<link>(.*?)</link>', item_xml)
-                            source_match = re.search(r'<source[^>]*>(.*?)</source>', item_xml)
-                            
-                            title = title_match.group(1) if title_match else ""
-                            link = link_match.group(1) if link_match else "#"
-                            source = source_match.group(1) if source_match else "Google News"
-                            
-                            if not title or len(title) < 10:
-                                continue
-                            
-                            # Clean up title
-                            title = re.sub(r'<[^>]+>', '', title).strip()
-                            
-                            sentiment = 0
-                            title_lower = title.lower()
-                            for word in ["surge", "jump", "rally", "gain", "rise", "beat", "record", "high", "growth"]:
-                                if word in title_lower:
-                                    sentiment += 1
-                            for word in ["fall", "drop", "crash", "plunge", "miss", "low", "loss", "fear", "sell"]:
-                                if word in title_lower:
-                                    sentiment -= 1
-                            
-                            news_items.append({
-                                "title": title,
+                                "title": title[:200],  # Truncate long titles
                                 "publisher": source,
-                                "link": link,
+                                "link": link.strip(),
                                 "time": len(news_items),
                                 "sentiment": sentiment,
-                                "ticker": "NEWS"
+                                "ticker": source
                             })
                 except Exception:
-                    pass
+                    continue
             
+            # Fallback message if no news
             if not news_items:
                 news_items = [{
-                    "title": "Markets are active. Check Yahoo Finance for latest updates.",
+                    "title": "Markets are active. Check financial news sites for latest updates.",
                     "publisher": "Marta Tools",
                     "link": "https://finance.yahoo.com",
                     "time": 0,
@@ -1083,7 +1047,7 @@ def main():
                     "ticker": "INFO"
                 }]
             
-            return news_items[:10]
+            return news_items[:15]  # Return top 15
 
         # Refresh button
         col_refresh, col_date = st.columns([1, 4])
@@ -1122,20 +1086,45 @@ def main():
         
         with col_sent:
             if indices_data:
+                # Calculate market breadth
                 bullish_count = sum(1 for d in indices_data.values() if d.get("change", 0) > 0 and "VIX" not in d.get("symbol", ""))
                 total_indices = len([d for d in indices_data.values() if "VIX" not in d.get("symbol", "")])
+                breadth_ratio = bullish_count / total_indices if total_indices > 0 else 0.5
+                
+                # Get VIX level
                 vix_data = indices_data.get("VIX (Fear)", {})
                 vix_level = vix_data.get("price", 20)
                 
-                if vix_level > 30:
-                    fear_level, fear_emoji = "FEAR", "😨"
-                    fear_color = "#EF4444"
-                elif vix_level > 20:
-                    fear_level, fear_emoji = "CAUTION", "😐"
-                    fear_color = "#F59E0B"
+                # Calculate news sentiment
+                if news_data:
+                    avg_news_sentiment = sum(n["sentiment"] for n in news_data) / len(news_data) if news_data else 0
                 else:
-                    fear_level, fear_emoji = "GREED", "🤑"
-                    fear_color = "#10B981"
+                    avg_news_sentiment = 0
+                
+                # Composite Fear/Greed Score (0-100)
+                # VIX: inverted and normalized (low VIX = greed, high VIX = fear)
+                vix_score = max(0, min(100, 100 - (vix_level - 10) * 5))  # VIX 10=100, 30=0
+                
+                # Breadth: percentage of indices up
+                breadth_score = breadth_ratio * 100
+                
+                # News: normalized to 0-100
+                news_score = max(0, min(100, 50 + (avg_news_sentiment * 10)))
+                
+                # Weighted composite (VIX 40%, Breadth 30%, News 30%)
+                composite_score = (vix_score * 0.4) + (breadth_score * 0.3) + (news_score * 0.3)
+                
+                # Classify sentiment
+                if composite_score >= 70:
+                    fear_level, fear_emoji, fear_color = "EXTREME GREED", "🤑", "#10B981"
+                elif composite_score >= 55:
+                    fear_level, fear_emoji, fear_color = "GREED", "😊", "#10B981"
+                elif composite_score >= 45:
+                    fear_level, fear_emoji, fear_color = "NEUTRAL", "😐", "#F59E0B"
+                elif composite_score >= 30:
+                    fear_level, fear_emoji, fear_color = "FEAR", "😰", "#EF4444"
+                else:
+                    fear_level, fear_emoji, fear_color = "EXTREME FEAR", "😱", "#EF4444"
                 
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, {fear_color}15, {fear_color}30); 
@@ -1143,7 +1132,8 @@ def main():
                     <div style="font-size: 2.5rem; margin-bottom: 8px;">{fear_emoji}</div>
                     <h2 style="margin: 0; color: {fear_color}; font-size: 1.8rem; letter-spacing: 2px;">{fear_level}</h2>
                     <p style="margin: 12px 0 0 0; color: #64748B; font-size: 0.9rem;">
-                        VIX: <strong>{vix_level:.1f}</strong> · {bullish_count}/{total_indices} indices up
+                        Score: <strong>{composite_score:.0f}/100</strong> · VIX: <strong>{vix_level:.1f}</strong><br/>
+                        {bullish_count}/{total_indices} indices up
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
