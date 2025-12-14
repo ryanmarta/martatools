@@ -854,9 +854,22 @@ def main():
             # --- KALMAN VISUALIZATION ---
             if kalman_df is not None and not kalman_df.empty:
                 st.markdown("#### 🔭 Kalman Trajectory (True Value vs Noise)")
+                
+                # Calculate VWAP
+                if 'Volume' in kalman_df.columns and 'High' in kalman_df.columns and 'Low' in kalman_df.columns:
+                    kalman_df['TP'] = (kalman_df['High'] + kalman_df['Low'] + kalman_df['Close']) / 3
+                    kalman_df['TPV'] = kalman_df['TP'] * kalman_df['Volume']
+                    kalman_df['VWAP'] = kalman_df['TPV'].cumsum() / kalman_df['Volume'].cumsum()
+                    has_vwap = True
+                else:
+                    has_vwap = False
+                
                 fig_k = go.Figure()
                 fig_k.add_trace(go.Scatter(x=kalman_df.index, y=kalman_df['Close'], name='Price', line=dict(color='gray', width=1)))
                 fig_k.add_trace(go.Scatter(x=kalman_df.index, y=kalman_df['Kalman'], name='Kalman True Value', line=dict(color='#3B82F6', width=2)))
+                
+                if has_vwap:
+                    fig_k.add_trace(go.Scatter(x=kalman_df.index, y=kalman_df['VWAP'], name='VWAP', line=dict(color='#F59E0B', width=2, dash='dash')))
                 
                 upper = kalman_df['Kalman'] + (2 * kalman_df['Res_Std'])
                 lower = kalman_df['Kalman'] - (2 * kalman_df['Res_Std'])
@@ -865,6 +878,21 @@ def main():
                 
                 fig_k.update_layout(template='plotly_white', height=400, margin=dict(l=0,r=0,t=10,b=0))
                 st.plotly_chart(fig_k, use_container_width=True)
+                
+                # VWAP Status
+                if has_vwap:
+                    current_price = kalman_df['Close'].iloc[-1]
+                    current_vwap = kalman_df['VWAP'].iloc[-1]
+                    vwap_delta = ((current_price - current_vwap) / current_vwap) * 100
+                    vwap_direction = "ABOVE" if current_price > current_vwap else "BELOW"
+                    vwap_color = "#10B981" if current_price > current_vwap else "#EF4444"
+                    
+                    st.markdown(f"""
+                    <div style="border:1px solid #E2E8F0; padding:10px; border-radius:6px; background:#F8FAFC; margin-top:10px;">
+                        <strong>VWAP:</strong> <span style="color:{vwap_color}; font-weight:600;">${current_vwap:.2f}</span> | 
+                        Price is <span style="color:{vwap_color}; font-weight:600;">{vwap_direction}</span> by {abs(vwap_delta):.2f}%
+                    </div>
+                    """, unsafe_allow_html=True)
 
             # --- FINAL DECISION MATRIX ---
             st.markdown("#### 🤖 Final Decision Matrix")
