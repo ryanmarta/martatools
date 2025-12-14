@@ -929,7 +929,17 @@ def main():
             with st.spinner("Analyzing Macro Regime..."):
                 regime, macro_score, macro_df, horsemen = qs.run_layer1_regime()
             
-            # --- CALCULATE TAIL RISK ---
+            # Layer 2: Kalman Filter (MUST be before strategy)
+            kalman_df = qs.run_layer2_kalman()
+            if kalman_df is not None and not kalman_df.empty:
+                kalman_z = kalman_df['Kalman_Z'].iloc[-1]
+            else:
+                kalman_z = 0
+            
+            # Layer 3: GARCH Volatility
+            sizing, vol_ratio, garch_status = qs.run_layer3_garch()
+            
+            # Layer 4: Jump Diffusion Tail Risk
             tail_risk, tail_score, jump_prob = qs.run_layer4_jump_diffusion()
             
             st.markdown("---")
@@ -1097,12 +1107,6 @@ def main():
                         st.info("N/A")
             
             st.markdown("---")
-            
-            # Layer 2: Kalman Filter
-            kalman_df = qs.run_layer2_kalman()
-            
-            # Layer 3: GARCH Volatility
-            sizing, vol_ratio, garch_status = qs.run_layer3_garch()
             
             # --- DISPLAY THE 3 LAYERS ---
             c1, c2, c3 = st.columns(3)
