@@ -888,16 +888,11 @@ def main():
         st.title("🎯 Sniper: Single Stock Analysis")
         st.caption("Volatility Squeeze + Volume Velocity + Relative Strength + Monte Carlo")
         
-        # Ticker input in main area
-        col_t1, col_t2, col_t3, col_t4 = st.columns([2, 1, 1, 1])
-        with col_t1:
-            ticker = st.text_input("TICKER", value="TSLA", label_visibility="collapsed", placeholder="Enter ticker (e.g., TSLA)").upper()
-        with col_t2:
-            rf = st.number_input("Risk Free %", value=4.5, min_value=0.0, max_value=10.0, step=0.1)
-        with col_t3:
-            cap = st.number_input("Capital $", value=100000, min_value=1000, step=1000)
-        with col_t4:
-            kelly = st.slider("Kelly", 0.1, 1.0, 0.5, 0.05)
+        # Ticker input in main area (SINGLE INPUT ONLY)
+        ticker = st.text_input("Enter Ticker Symbol", value="TSLA", placeholder="e.g., TSLA, AAPL, NVDA").upper()
+        
+        # Use default values for calculations (hidden from user)
+        rf, cap, kelly = 4.5, 100000, 0.5
         
         st.markdown("---")
         
