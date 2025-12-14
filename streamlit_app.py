@@ -113,11 +113,11 @@ st.markdown(
             color: #000000 !important;
         }
         
-        /* METRIC LABELS - BLACK */
+        /* METRIC LABELS - DARK GRAY LIKE L1:DIRECTION */
         div[data-testid="stMetricLabel"] {
             font-size: 0.95rem !important;
             font-weight: 700 !important;
-            color: #000000 !important;
+            color: #64748B !important;
             margin-bottom: 6px !important;
             display: block !important;
             visibility: visible !important;
