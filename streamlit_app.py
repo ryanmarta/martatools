@@ -369,13 +369,13 @@ class QuantStackEngine:
         """Layer 1: Direction (Four Horsemen Macro Regime)"""
         closes = self.fetch_macro_data()
         if closes.empty:
-            return "NEUTRAL", 0.0, pd.DataFrame()
+            return "NEUTRAL", 0.0, pd.DataFrame(), {}
 
         factors = pd.DataFrame(index=closes.index)
         needed = set(self.MACRO_TICKERS)
         existing = set(closes.columns)
         if not needed.issubset(existing):
-            return "NEUTRAL", 0.0, pd.DataFrame()
+            return "NEUTRAL", 0.0, pd.DataFrame(), {}
 
         factors['Credit'] = closes['JNK'] / closes['LQD']
         factors['Consumer'] = closes['XLY'] / closes['XLP']
@@ -397,7 +397,15 @@ class QuantStackEngine:
         elif current_score < -1.0: 
             regime = "BEAR"
         
-        return regime, current_score, z_scores
+        # Extract current ratios and z-scores
+        current_ratios = {
+            'Credit': {'value': factors['Credit'].iloc[-1], 'z': z_scores['Credit'].iloc[-1]},
+            'Consumer': {'value': factors['Consumer'].iloc[-1], 'z': z_scores['Consumer'].iloc[-1]},
+            'Growth': {'value': factors['Growth'].iloc[-1], 'z': z_scores['Growth'].iloc[-1]},
+            'Fear': {'value': factors['Fear'].iloc[-1], 'z': z_scores['Fear'].iloc[-1]}
+        }
+        
+        return regime, current_score, z_scores, current_ratios
 
     def run_layer2_kalman(self):
         """Layer 2: Valuation (Kalman Filter True Value)"""
@@ -450,6 +458,46 @@ class QuantStackEngine:
             return sizing, vol_ratio, status
         except:
             return 1.0, 1.0, "GARCH Error"
+
+    def run_layer4_jump_diffusion(self):
+        """Layer 4: Tail Risk (Simplified Merton Jump Diffusion)"""
+        if self.history.empty or len(self.history) < 60:
+            return "UNKNOWN", 0.0, 0.0
+        
+        returns = self.history['Close'].pct_change().dropna()
+        
+        # Calculate extreme move threshold (3 standard deviations)
+        mu = returns.mean()
+        sigma = returns.std()
+        threshold = 3 * sigma
+        
+        # Count jumps (moves > 3 sigma)
+        jumps = returns[abs(returns - mu) > threshold]
+        jump_count = len(jumps)
+        total_days = len(returns)
+        
+        # Jump intensity (lambda): probability of jump per day
+        jump_intensity = jump_count / total_days if total_days > 0 else 0
+        
+        # Average jump size
+        jump_size = abs(jumps).mean() if len(jumps) > 0 else 0
+        
+        # Tail risk score (0-1, lower is better)
+        # Based on: how often jumps occur + how big they are
+        tail_risk_score = min(1.0, (jump_intensity * 10) + (jump_size * 2))
+        
+        # Classification
+        if tail_risk_score < 0.3:
+            risk_class = "LOW"
+        elif tail_risk_score < 0.6:
+            risk_class = "MEDIUM"
+        else:
+            risk_class = "HIGH"
+        
+        # Probability of extreme move in next period (simplified)
+        jump_prob = min(0.99, jump_intensity * 100)  # Convert to percentage
+        
+        return risk_class, tail_risk_score, jump_prob
 
 
 # ------------------------------------------------------------------------------
@@ -726,11 +774,67 @@ class ScannerEngine:
                     else:
                         action = "🔻 SHORT"
 
+                # --- QUANT SANDWICH (3-Layer Stack) ---
+                quant_score = 0
+                regime = "NEUTRAL"
+                vol_mult = 1.0
+                tail_risk = "MEDIUM"
+                
+                try:
+                    # Run Quant Stack Engine
+                    qs = QuantStackEngine(symbol, df)
+                    
+                    # Layer 1: Four Horsemen Macro Regime
+                    regime, macro_score, _, horsemen = qs.run_layer1_regime()
+                    
+                    # Layer 2: GARCH Volatility Sizing
+                    vol_mult, vol_ratio, _ = qs.run_layer3_garch()
+                    
+                    # Layer 3: Jump Diffusion Tail Risk
+                    tail_risk, tail_score, jump_prob = qs.run_layer4_jump_diffusion()
+                    
+                    # Composite Quant Score (0-100)
+                    # Layer 1: Regime (30 points)
+                    if regime == "BULL":
+                        quant_score += 30
+                    elif regime == "NEUTRAL":
+                        quant_score += 15
+                    # BEAR = 0 points
+                    
+                    # Layer 2: Volatility Sizing (30 points)
+                    # Reward stable/low vol, penalize high vol
+                    if vol_mult >= 1.0:  # Low vol environment
+                        quant_score += 30
+                    elif vol_mult >= 0.7:
+                        quant_score += 20
+                    else:  # High vol
+                        quant_score += 10
+                    
+                    # Layer 3: Tail Risk (40 points)
+                    # Reward low tail risk
+                    if tail_risk == "LOW":
+                        quant_score += 40
+                    elif tail_risk == "MEDIUM":
+                        quant_score += 25
+                    else:  # HIGH
+                        quant_score += 10
+                    
+                except Exception:
+                    # If Quant Stack fails, default to neutral scores
+                    quant_score = 50
+                    regime = "NEUTRAL"
+                    vol_mult = 1.0
+                    tail_risk = "UNKNOWN"
+
                 results.append(
                     {
                         "Ticker": symbol,
                         "Action": action,
                         "Confidence": confidence,
+                        "Quant_Score": quant_score,  # NEW
+                        "Regime": regime,  # NEW
+                        "Vol_Sizing": f"{vol_mult:.1f}x",  # NEW
+                        "Tail_Risk": tail_risk,  # NEW
                         "Price": curr_p,
                         "Trend": trend,
                         "Momentum": mom,
@@ -758,19 +862,29 @@ def main():
         st.markdown("### 🛠️ Marta Tools")
         
         mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter", "🔍 Opt Hunt", "📊 ETF Hunt", "📊 ETF Opts", "🩳 Shorties", "👃 Pickers"], label_visibility="collapsed")
-
-        if mode == "🎯 Sniper":
-            st.markdown("---")
-            ticker = st.text_input("TICKER", value="TSLA").upper()
-            rf = st.number_input("RISK FREE (%)", value=4.5)
-            cap = st.number_input("CAPITAL ($)", value=100000)
-            kelly = st.slider("KELLY FACTOR", 0.1, 1.0, 0.5)
         
         st.markdown("---")
         st.caption("Tap ✕ or swipe to close")
 
-    # --- SHARED INIT (only for Sniper mode now) ---
+    # --- SNIPER MODE ---
     if mode == "🎯 Sniper":
+        st.title("🎯 Sniper: Single Stock Analysis")
+        st.caption("Volatility Squeeze + Volume Velocity + Relative Strength + Monte Carlo")
+        
+        # Ticker input in main area
+        col_t1, col_t2, col_t3, col_t4 = st.columns([2, 1, 1, 1])
+        with col_t1:
+            ticker = st.text_input("TICKER", value="TSLA", label_visibility="collapsed", placeholder="Enter ticker (e.g., TSLA)").upper()
+        with col_t2:
+            rf = st.number_input("Risk Free %", value=4.5, min_value=0.0, max_value=10.0, step=0.1)
+        with col_t3:
+            cap = st.number_input("Capital $", value=100000, min_value=1000, step=1000)
+        with col_t4:
+            kelly = st.slider("Kelly", 0.1, 1.0, 0.5, 0.05)
+        
+        st.markdown("---")
+        
+        # Fetch data
         hydra = HydraEngine()
         with st.spinner(f"Connecting to {ticker}..."):
             spot, src = hydra.get_spot(ticker)
@@ -786,10 +900,7 @@ def main():
             st.warning("⚠️ Limited historical data available. Some features may be restricted.")
             hist = pd.DataFrame()
 
-        # ==========================================
-        # QUANT STACK ANALYSIS (Sniper Enhancement)
-        # ==========================================
-        st.title(f"🎯 Sniper Intelligence: {ticker}")
+        # Display current price
         st.success(f"**{ticker}** | Spot: `${spot:.2f}` | Source: `{src}`")
         
         st.markdown("### 🏛️ Quant Stack Analysis")
@@ -799,7 +910,68 @@ def main():
             
             # Layer 1: Macro Regime
             with st.spinner("Analyzing Macro Regime..."):
-                regime, macro_score, macro_df = qs.run_layer1_regime()
+                regime, macro_score, macro_df, horsemen = qs.run_layer1_regime()
+            
+            # --- FOUR HORSEMEN DISPLAY (The Black Box) ---
+            st.markdown("#### \ud83d\udc34 The Four Horsemen (Institutional Flow Indicators)")
+            st.caption("The invisible ratios that drive smart money - we don't care about price, we care about the environment.")
+            
+            h1, h2, h3, h4 = st.columns(4)
+            
+            horsemen_config = {
+                'Credit': {
+                    'label': '\ud83c\udfdb\ufe0f Credit',
+                    'subtitle': 'JNK / LQD',
+                    'tooltip': 'Risk ON (rising) vs Risk OFF (falling)',
+                    'col': h1
+                },
+                'Consumer': {
+                    'label': '\ud83d\udecd\ufe0f Consumer',
+                    'subtitle': 'XLY / XLP',
+                    'tooltip': 'iPads (Bullish) vs Toothpaste (Bearish)',
+                    'col': h2
+                },
+                'Growth': {
+                    'label': '\ud83d\udcc8 Rate/Growth',
+                    'subtitle': 'QQQ / TLT',
+                    'tooltip': 'Tech (Growth) vs Bonds (Duration)',
+                    'col': h3
+                },
+                'Fear': {
+                    'label': '\ud83e\ude99 Inflation',
+                    'subtitle': 'SPY / GLD',
+                    'tooltip': 'Stocks (Risk) vs Gold (Safety)',
+                    'col': h4
+                }
+            }
+            
+            for horse_name, config in horsemen_config.items():
+                with config['col']:
+                    if horse_name in horsemen and horsemen[horse_name]:
+                        z = horsemen[horse_name]['z']
+                        val = horsemen[horse_name]['value']
+                        
+                        # Color based on Z-score (positive = bullish, negative = bearish)
+                        if z > 1.0:
+                            sentiment, color = "BULLISH", "#10B981"
+                        elif z < -1.0:
+                            sentiment, color = "BEARISH", "#EF4444"
+                        else:
+                            sentiment, color = "NEUTRAL", "#F59E0B"
+                        
+                        st.markdown(f"""
+                        <div style="border:1px solid #E2E8F0; padding:10px; border-radius:6px; background:linear-gradient(135deg, {color}10, {color}20);">
+                            <div style="font-size:0.75rem; color:#64748B; margin-bottom:3px;">{config['label']}</div>
+                            <div style="font-size:1.1rem; font-weight:700; color:{color};">{sentiment}</div>
+                            <div style="font-size:0.7rem; color:#94A3B8; margin-top:2px;">
+                                {config['subtitle']}<br/>Z: {z:.2f}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.info("N/A")
+            
+            st.markdown("---")
             
             # Layer 2: Kalman Filter
             kalman_df = qs.run_layer2_kalman()
@@ -1079,6 +1251,48 @@ def main():
                         st.metric(name, f"${data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="normal")
         else:
             st.warning("Unable to load indices data")
+        
+        # --- FOUR HORSEMEN INDICATORS ---
+        st.markdown("---")
+        st.markdown("#### 🐴 Four Horsemen (Institutional Flows)")
+        
+        # Calculate horsemen using QuantStackEngine
+        try:
+            temp_qs = QuantStackEngine("SPY", pd.DataFrame())  # Dummy ticker, we only need macro
+            _, _, _, horsemen_dash = temp_qs.run_layer1_regime()
+            
+            if horsemen_dash:
+                hcol1, hcol2, hcol3, hcol4 = st.columns(4)
+                
+                horsemen_labels = {
+                    'Credit': ('🏛️ Credit Risk', 'JNK/LQD', hcol1),
+                    'Consumer': ('🛍️ Consumer Spending', 'XLY/XLP', hcol2),
+                    'Growth': ('📈 Rate/Growth', 'QQQ/TLT', hcol3),
+                    'Fear': ('🪙 Inflation Fear', 'SPY/GLD', hcol4)
+                }
+                
+                for horse_name, (label, ratio, col) in horsemen_labels.items():
+                    with col:
+                        if horse_name in horsemen_dash:
+                            z = horsemen_dash[horse_name]['z']
+                            val = horsemen_dash[horse_name]['value']
+                            
+                            if z > 1.0:
+                                sentiment, delta_color = "🟢 Bullish", "normal"
+                            elif z < -1.0:
+                                sentiment, delta_color = "🔴 Bearish", "inverse"
+                            else:
+                                sentiment, delta_color = "🟡 Neutral", "off"
+                            
+                            st.metric(
+                                label=f"{label}",
+                                value=f"{val:.3f}",
+                                delta=sentiment,
+                                delta_color=delta_color,
+                                help=f"{ratio} | Z-Score: {z:.2f}"
+                            )
+        except Exception:
+            st.info("Loading institutional flow data...")
 
         # --- SENTIMENT + CHART ROW ---
         st.markdown("---")
