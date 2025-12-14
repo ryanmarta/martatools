@@ -341,13 +341,26 @@ class QuantStackEngine:
         """Fetch macro indicator data for regime detection."""
         try:
             data = yf.download(_self.MACRO_TICKERS, period="1y", progress=False)
+            
+            # Handle MultiIndex columns from yfinance
             if isinstance(data.columns, pd.MultiIndex):
-                try: 
-                    data.columns = data.columns.get_level_values(0)
-                except: 
-                    pass
-            data = data.loc[:, ~data.columns.duplicated()]
-            closes = data['Close'].ffill().dropna()
+                # Extract just the 'Close' prices for all tickers
+                if 'Close' in data.columns.get_level_values(0):
+                    closes = data['Close']
+                else:
+                    return pd.DataFrame()
+            else:
+                # Single ticker or already flattened
+                if 'Close' in data.columns:
+                    closes = data[['Close']]
+                else:
+                    return pd.DataFrame()
+            
+            # Ensure we have a DataFrame, not a Series
+            if isinstance(closes, pd.Series):
+                closes = closes.to_frame()
+            
+            closes = closes.ffill().dropna()
             return closes
         except Exception:
             return pd.DataFrame()
