@@ -62,82 +62,126 @@ st.markdown(
             font-family: 'JetBrains Mono', monospace;
             border-left: 4px solid #64748B;
             background: #FFFFFF;
-            border: 1px solid #E2E8F0;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        }
-        .signal-buy { border-left-color: #10B981; background: #ECFDF5; color: #064E3B; }
-        .signal-sell { border-left-color: #EF4444; background: #FEF2F2; color: #991B1B; }
+        /* GLOBAL READABILITY IMPROVEMENTS */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         
-        /* DATAFRAMES */
-        .stDataFrame { border: 1px solid #E2E8F0; border-radius: 6px; }
-        
-        /* HEADERS */
-        h1, h2, h3 { font-family: 'Inter', sans-serif; letter-spacing: -0.5px; color: #0F172A; }
-        
-        /* EDUCATIONAL FOOTER */
-        .edu-footer {
-            background-color: #F1F5F9;
-            padding: 20px;
-            border-radius: 12px;
-            border-left: 5px solid #2563EB;
-            margin-top: 30px;
-            color: #334155;
+        html, body, [class*="css"] {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+            font-size: 15px !important;
         }
         
-        /* MOBILE IMPROVEMENTS */
-        @media (max-width: 768px) {
-            /* Make sidebar narrower on mobile */
-            section[data-testid="stSidebar"] {
-                width: 200px !important;
-                min-width: 200px !important;
-            }
-            section[data-testid="stSidebar"] > div {
-                padding: 0.5rem !important;
-            }
-        }
-        
-        /* Better radio button styling */
-        .stRadio > div {
-            gap: 0.25rem !important;
-        }
-        .stRadio > div > label {
-            background: #F1F5F9 !important;
-            padding: 0.75rem 1rem !important;
+        /* SIDEBAR - MAKE LABELS READABLE */
+        .stRadio > label {
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            color: #1F2937 !important;
+            padding: 12px 16px !important;
+            background: white !important;
             border-radius: 8px !important;
-            margin: 2px 0 !important;
-            cursor: pointer !important;
+            margin: 4px 0 !important;
+            display: block !important;
+            border: 2px solid #E5E7EB !important;
             transition: all 0.2s !important;
-            border: 2px solid transparent !important;
         }
-        .stRadio > div > label:hover {
-            background: #E2E8F0 !important;
+        
+        .stRadio > label:hover {
+            background: #F3F4F6 !important;
+            border-color: #3B82F6 !important;
         }
-        .stRadio > div > label[data-checked="true"],
-        .stRadio > div > label:has(input:checked) {
-            background: #2563EB !important;
-            color: white !important;
-            border-color: #1D4ED8 !important;
+        
+        .stRadio > label[data-baseweb="radio"] > div:first-child {
+            background-color: #3B82F6 !important;
         }
+        
         /* Hide default radio circles */
         .stRadio > div > label > div:first-child {
             display: none !important;
         }
         
-        /* ENSURE METRIC LABELS ARE READABLE */
-        div[data-testid="stMetricLabel"] {
-            font-size: 0.875rem !important;
-            font-weight: 600 !important;
-            color: #475569 !important;
-            margin-bottom: 4px !important;
-            display: block !important;
-            visibility: visible !important;
-        }
-        div[data-testid="stMetricValue"] {
-            font-size: 1.5rem !important;
+        /* HEADINGS - DARK AND BOLD */
+        h1, h2, h3, h4, h5, h6 {
+            color: #111827 !important;
             font-weight: 700 !important;
         }
+        
+        h1 { font-size: 2.25rem !important; }
+        h2 { font-size: 1.875rem !important; }
+        h3 { font-size: 1.5rem !important; }
+        
+        /* TEXT - HIGH CONTRAST */
+        p, li, span, div {
+            color: #374151 !important;
+        }
+        
+        /* METRIC LABELS - ALWAYS VISIBLE */
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.95rem !important;
+            font-weight: 700 !important;
+            color: #1F2937 !important;
+            margin-bottom: 6px !important;
+            display: block !important;
+            visibility: visible !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.5px !important;
+        }
+        
+        div[data-testid="stMetricValue"] {
+            font-size: 1.75rem !important;
+            font-weight: 800 !important;
+            color: #111827 !important;
+        }
+        
         div[data-testid="stMetricDelta"] {
-            font-size: 0.75rem !important;
+            font-size: 0.875rem !important;
+            font-weight: 600 !important;
+        }
+        
+        /* INPUT FIELDS - DARK LABELS */
+        label {
+            color: #111827 !important;
+            font-weight: 600 !important;
+            font-size: 0.95rem !important;
+        }
+        
+        input, textarea, select {
+            font-size: 1rem !important;
+            color: #111827 !important;
+        }
+        
+        /* BUTTONS - HIGH CONTRAST */
+        button {
+            font-weight: 600 !important;
+            font-size: 0.95rem !important;
+        }
+        
+        /* DATAFRAME/TABLE - READABLE */
+        .dataframe {
+            font-size: 0.9rem !important;
+        }
+        
+        .dataframe th {
+            background-color: #1F2937 !important;
+            color: white !important;
+            font-weight: 700 !important;
+            padding: 12px !important;
+        }
+        
+        .dataframe td {
+            padding: 10px !important;
+            color: #374151 !important;
+        }
+        
+        /* CAPTION - MORE VISIBLE */
+        .caption, [data-testid="stCaptionContainer"] {
+            color: #6B7280 !important;
+            font-size: 0.9rem !important;
+        }
+        
+        /* EXPANDER - READABLE */
+        .streamlit-expanderHeader {
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            color: #111827 !important;
         }
     </style>
 """,
@@ -986,12 +1030,15 @@ def main():
                 
                 stop_loss = entry_price - stop_distance
                 
-                # Take profit: Based on Kalman bands
-                if kalman_df is not None:
-                    upper_band = kalman_df['Kalman'].iloc[-1] + (2 * kalman_df['Res_Std'].iloc[-1])
-                    target_1 = kalman_true_value + (kalman_true_value - current_price) * 1.5
-                    target_2 = upper_band
+                # Take profit: Reasonable targets based on ATR
+                if 'High' in kalman_df.columns and 'Low' in kalman_df.columns:
+                    recent_high = kalman_df['High'].tail(20).max()
+                    recent_low = kalman_df['Low'].tail(20).min()
+                    atr = (recent_high - recent_low) / 20
+                    target_1 = entry_price + (atr * 2)  # 2 ATR profit target
+                    target_2 = entry_price + (atr * 3)  # 3 ATR stretch target
                 else:
+                    # Fallback: 5% and 10% profit targets
                     target_1 = entry_price * 1.05
                     target_2 = entry_price * 1.10
                 
