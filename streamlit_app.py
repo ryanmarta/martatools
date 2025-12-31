@@ -5433,7 +5433,9 @@ Equity-substitute and deep-ITM structures are rejected by default.
 
         def run_quant_pipeline(universe, min_p, max_p):
             """Calculate quant factors for selected stock universe"""
-            tickers = universe
+            import random
+            tickers = list(universe)  # Make a copy
+            random.shuffle(tickers)   # Randomize order so not biased toward A-Z
             
             if not tickers:
                 return pd.DataFrame(), "No tickers in selected universe"
@@ -5441,7 +5443,7 @@ Equity-substitute and deep-ITM structures are rejected by default.
             # Fetch SPY for beta calculations
             spy_data = yf.download("SPY", period="1y", progress=False)
             
-            # Calculate Quant Factors
+            # Calculate Quant Factors for ALL stocks in universe
             results = []
             for ticker in tickers:
                 try:
