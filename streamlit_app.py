@@ -112,6 +112,27 @@ st.markdown(
             color: #0F172A !important;
         }
         
+        /* PRIMARY BUTTON - WHITE TEXT ON DARK BACKGROUND */
+        button[kind="primary"], 
+        .stButton > button[kind="primary"],
+        button[data-testid="baseButton-primary"] {
+            color: #FFFFFF !important;
+            background-color: #1E293B !important;
+            border: none !important;
+        }
+        
+        button[kind="primary"]:hover,
+        button[data-testid="baseButton-primary"]:hover {
+            background-color: #334155 !important;
+            color: #FFFFFF !important;
+        }
+        
+        /* ALL BUTTONS - ENSURE READABLE */
+        .stButton > button {
+            color: #FFFFFF !important;
+            background-color: #1E293B !important;
+        }
+        
         /* GLOBAL READABILITY IMPROVEMENTS */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         
@@ -5178,57 +5199,78 @@ Equity-substitute and deep-ITM structures are rejected by default.
     # ==========================================
     elif mode == "🧠 Ryan Model 2.0":
         st.title("🧠 Ryan Model 2.0: Quantitative Intelligence Funnel")
-        st.caption("Two-Pronged Execution | Finviz Screener → Composite Quant Factors")
+        st.caption("Five Composite Quant Factors | Value + Momentum + Low Vol + PEAD + RSI")
         
         st.markdown("""
         ### 📋 The Philosophical Objective
         
-        The Ryan Model 2.0 implements a **Two-Pronged Execution Workflow**:
-        1. **Prong 1**: Finviz Screener (efficiency-driven filtering of 8,000+ tickers)
-        2. **Prong 2**: Quant Stack (rigorous mathematical validation with 5 composite factors)
+        The Ryan Model 2.0 calculates **5 Composite Quant Factors** on a curated stock universe:
+        1. **Valuation + Sentiment** (P/E based)
+        2. **Post-Earnings Drift** (PEAD signal)
+        3. **Low Volatility Anomaly** (Beta < 1.0)
+        4. **RSI-2 Mean Reversion** (Oversold in uptrend)
+        5. **Value + Momentum** (Magic Formula proxy)
         
-        This model transforms qualitative "chart patterns" into quantitative "statistical probabilities."
+        *Each factor scores 0-100, weighted into a final Conviction Score.*
         """)
 
-        with st.expander("🛠️ Screener Configuration", expanded=False):
-            sc1, sc2 = st.columns(2)
-            with sc1:
-                min_conviction = st.slider("Min Conviction Score", 30, 95, 50, key="ryan_conv")
-            with sc2:
-                max_results = st.slider("Max Results", 10, 100, 50, key="ryan_max")
-
-        @st.cache_data(ttl=1800)
-        def run_finviz_screener():
-            """Stage 1: Finviz Screener (The Wide Net)"""
-            if not FINVIZ_AVAILABLE:
-                st.warning("⚠️ Finviz library not available. Using fallback ticker list.")
-                # Fallback list of quality liquid stocks
-                return [
-                    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "AMD", "NFLX",
-                    "JPM", "V", "MA", "UNH", "JNJ", "PG", "HD", "BAC", "XOM", "CVX",
-                    "LLY", "ABBV", "MRK", "PFE", "COST", "WMT", "KO", "PEP", "MCD", "DIS",
-                    "CRM", "ORCL", "ADBE", "INTC", "QCOM", "TXN", "CAT", "DE", "GE", "BA"
-                ]
-                
-            try:
-                fviz = FinvizOverview()
-                filters_dict = {
-                    'Price': 'Over $5',
-                    'Market Cap.': '+Mid (over $2bln)',
-                    'Average Volume': 'Over 200K',
-                }
-                
-                fviz.set_filter(filters_dict=filters_dict)
-                df = fviz.screener_view()
-                
-                if df is not None and not df.empty:
-                    # Extract ticker symbols
-                    tickers = df['Ticker'].tolist() if 'Ticker' in df.columns else []
-                    return tickers[:100]  # Limit to top 100
-                return []
-            except Exception as e:
-                st.error(f"Finviz screener error: {str(e)}")
-                return []
+        # ADJUSTABLE FILTERS
+        with st.expander("🛠️ Screener Configuration", expanded=True):
+            st.markdown("**Filter Settings**")
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                min_price = st.slider("Min Price ($)", 1, 50, 5, key="ryan_min_price")
+                max_price = st.slider("Max Price ($)", 50, 2000, 500, key="ryan_max_price")
+            with fc2:
+                min_conviction = st.slider("Min Conviction Score", 20, 90, 40, key="ryan_conv")
+                max_results = st.slider("Max Results", 10, 100, 30, key="ryan_max")
+            with fc3:
+                universe_choice = st.selectbox("Stock Universe", [
+                    "🌟 Quality 100 (Recommended)",
+                    "📈 Mega Cap Tech",
+                    "💰 Financials",
+                    "🏥 Healthcare",
+                    "⚡ High Beta / Momentum"
+                ], key="ryan_universe")
+        
+        # STOCK UNIVERSES (No Finviz dependency)
+        STOCK_UNIVERSES = {
+            "🌟 Quality 100 (Recommended)": [
+                # Mega-cap Tech
+                "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "AMD", "NFLX",
+                "ORCL", "ADBE", "CRM", "INTC", "QCOM", "TXN", "MU", "NOW", "PANW", "SNOW",
+                # Financials
+                "JPM", "BAC", "V", "MA", "WFC", "GS", "MS", "AXP", "BLK", "C",
+                # Healthcare
+                "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE", "AMGN", "TMO", "DHR", "ABT",
+                # Consumer
+                "WMT", "COST", "PG", "HD", "KO", "PEP", "MCD", "DIS", "NKE", "SBUX",
+                # Industrial / Energy
+                "CAT", "DE", "HON", "GE", "BA", "XOM", "CVX", "COP", "SLB", "LMT",
+                # Growth / Momentum
+                "PLTR", "COIN", "MSTR", "DKNG", "ROKU", "SQ", "SHOP", "SPOT", "ABNB", "UBER"
+            ],
+            "📈 Mega Cap Tech": [
+                "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "ADBE",
+                "CRM", "AMD", "INTC", "QCOM", "TXN", "MU", "NOW", "PANW", "SNOW", "NET"
+            ],
+            "💰 Financials": [
+                "JPM", "BAC", "V", "MA", "WFC", "GS", "MS", "AXP", "BLK", "C",
+                "PYPL", "SCHW", "CME", "ICE", "SPGI", "MCO", "COF", "USB", "PNC", "TFC"
+            ],
+            "🏥 Healthcare": [
+                "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE", "AMGN", "TMO", "DHR", "ABT",
+                "BMY", "GILD", "ISRG", "VRTX", "REGN", "MDT", "SYK", "BSX", "ELV", "CI"
+            ],
+            "⚡ High Beta / Momentum": [
+                "TSLA", "NVDA", "AMD", "MSTR", "COIN", "PLTR", "DKNG", "ROKU", "SQ", "SHOP",
+                "AFRM", "UPST", "CVNA", "MARA", "RIOT", "CLSK", "HOOD", "SOFI", "AI", "IONQ"
+            ]
+        }
+        
+        def get_stock_universe(choice):
+            """Get stock list based on user selection"""
+            return STOCK_UNIVERSES.get(choice, STOCK_UNIVERSES["🌟 Quality 100 (Recommended)"])
 
         @st.cache_data(ttl=1800)
         def calculate_quant_factors(ticker, spy_data):
@@ -5389,41 +5431,40 @@ Equity-substitute and deep-ITM structures are rejected by default.
             except Exception as e:
                 return None
 
-        @st.cache_data(ttl=1800)
-        def run_quant_pipeline():
-            """Complete Two-Stage Pipeline"""
-            # Stage 1: Finviz Screener
-            tickers = run_finviz_screener()
+        def run_quant_pipeline(universe, min_p, max_p):
+            """Calculate quant factors for selected stock universe"""
+            tickers = universe
             
             if not tickers:
-                return pd.DataFrame(), "No tickers from screener"
+                return pd.DataFrame(), "No tickers in selected universe"
             
             # Fetch SPY for beta calculations
             spy_data = yf.download("SPY", period="1y", progress=False)
             
-            # Stage 2: Calculate Quant Factors
+            # Calculate Quant Factors
             results = []
-            # Shuffle to avoid alphabetical bias (Finviz returns A-Z)
-            import random
-            random.shuffle(tickers)
-            for ticker in tickers[:50]:  # Limit processing for speed
+            for ticker in tickers:
                 try:
                     factors = calculate_quant_factors(ticker, spy_data)
                     if factors:
-                        results.append(factors)
+                        # Apply price filter
+                        if min_p <= factors['price'] <= max_p:
+                            results.append(factors)
                 except:
                     continue
             
             df = pd.DataFrame(results)
             return df, None
 
-        if st.button("🚀 Initialize Quant Intelligence Funnel", key="ryan_scan"):
-            with st.spinner("Stage 1: Running Finviz Screener..."):
-                progress_bar = st.progress(0, text="Screening 8,000+ tickers...")
-                
-            with st.spinner("Stage 2: Calculating Composite Quant Factors..."):
-                df_results, error = run_quant_pipeline()
-                progress_bar.progress(100, text="Analysis Complete.")
+        if st.button("🚀 Run Quant Analysis", type="primary", use_container_width=True, key="ryan_scan"):
+            selected_universe = get_stock_universe(universe_choice)
+            
+            progress_bar = st.progress(0, text="Initializing...")
+            progress_bar.progress(10, text=f"Analyzing {len(selected_universe)} stocks...")
+            
+            with st.spinner(f"Calculating 5 Quant Factors for {len(selected_universe)} stocks..."):
+                df_results, error = run_quant_pipeline(selected_universe, min_price, max_price)
+                progress_bar.progress(100, text="Analysis Complete!")
                 progress_bar.empty()
                 
                 if error:
