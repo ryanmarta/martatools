@@ -89,6 +89,29 @@ st.markdown(
             font-family: 'JetBrains Mono', monospace;
             border-left: 4px solid #64748B;
             background: #FFFFFF;
+        }
+        
+        /* EXPANDER CONTENT - ENSURE READABLE TEXT */
+        .streamlit-expanderContent {
+            color: #0F172A !important;
+        }
+        
+        .streamlit-expanderContent div, 
+        .streamlit-expanderContent span,
+        .streamlit-expanderContent p,
+        .streamlit-expanderContent label {
+            color: #0F172A !important;
+        }
+        
+        /* SLIDER LABELS - ENSURE VISIBILITY */
+        .stSlider > div > div > div > div {
+            color: #0F172A !important;
+        }
+        
+        .stSlider label {
+            color: #0F172A !important;
+        }
+        
         /* GLOBAL READABILITY IMPROVEMENTS */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         
@@ -5170,7 +5193,7 @@ Equity-substitute and deep-ITM structures are rejected by default.
         with st.expander("🛠️ Screener Configuration", expanded=False):
             sc1, sc2 = st.columns(2)
             with sc1:
-                min_conviction = st.slider("Min Conviction Score", 50, 95, 70, key="ryan_conv")
+                min_conviction = st.slider("Min Conviction Score", 30, 95, 50, key="ryan_conv")
             with sc2:
                 max_results = st.slider("Max Results", 10, 100, 50, key="ryan_max")
 
@@ -5178,16 +5201,21 @@ Equity-substitute and deep-ITM structures are rejected by default.
         def run_finviz_screener():
             """Stage 1: Finviz Screener (The Wide Net)"""
             if not FINVIZ_AVAILABLE:
-                st.warning("⚠️ Finviz library not available. Install with: `pip install finvizfinance`")
-                return []
+                st.warning("⚠️ Finviz library not available. Using fallback ticker list.")
+                # Fallback list of quality liquid stocks
+                return [
+                    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "AMD", "NFLX",
+                    "JPM", "V", "MA", "UNH", "JNJ", "PG", "HD", "BAC", "XOM", "CVX",
+                    "LLY", "ABBV", "MRK", "PFE", "COST", "WMT", "KO", "PEP", "MCD", "DIS",
+                    "CRM", "ORCL", "ADBE", "INTC", "QCOM", "TXN", "CAT", "DE", "GE", "BA"
+                ]
                 
             try:
                 fviz = FinvizOverview()
                 filters_dict = {
-                    'Price': 'Over $10',
-                    'Market Cap.': '+Large (over $10bln)',
-                    'Relative Volume': 'Over 1',
-                    'Average Volume': 'Over 500K',
+                    'Price': 'Over $5',
+                    'Market Cap.': '+Mid (over $2bln)',
+                    'Average Volume': 'Over 200K',
                 }
                 
                 fviz.set_filter(filters_dict=filters_dict)
