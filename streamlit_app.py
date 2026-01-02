@@ -6348,6 +6348,259 @@ Equity-substitute and deep-ITM structures are rejected by default.
             - Identify regime shifts (changing correlations)
             - Spot crowded trades (high correlation clusters)
             """)
+        
+        # ==========================================
+        # PAIRS DEEP DIVE SECTION
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🔬 Pairs Deep Dive Analysis")
+        st.caption("Cointegration Test + Half-Life + Z-Score Signals + Backtest")
+        
+        with st.expander("⚙️ Deep Dive Configuration", expanded=True):
+            dd1, dd2 = st.columns(2)
+            with dd1:
+                pair_a = st.text_input("Stock A (e.g. MA)", value="MA", key="pair_a").upper().strip()
+                pair_b = st.text_input("Stock B (e.g. V)", value="V", key="pair_b").upper().strip()
+            with dd2:
+                dd_lookback = st.selectbox("Lookback Period", ["6 Months", "1 Year", "2 Years"], index=1, key="dd_lookback")
+                entry_z = st.slider("Entry Z-Score", 1.0, 3.0, 2.0, 0.1, key="entry_z")
+                exit_z = st.slider("Exit Z-Score", 0.0, 1.5, 0.5, 0.1, key="exit_z")
+        
+        if st.button("🔬 Run Pairs Deep Dive", type="primary", use_container_width=True, key="pairs_deep"):
+            if not pair_a or not pair_b or pair_a == pair_b:
+                st.error("Please enter two different stock symbols.")
+            else:
+                # Determine start date
+                if "6 Months" in dd_lookback:
+                    start = (pd.Timestamp.now() - pd.DateOffset(months=6)).strftime('%Y-%m-%d')
+                elif "2 Years" in dd_lookback:
+                    start = (pd.Timestamp.now() - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+                else:
+                    start = (pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
+                
+                with st.spinner(f"Analyzing {pair_a} vs {pair_b}..."):
+                    try:
+                        # Download prices
+                        prices = yf.download([pair_a, pair_b], start=start, progress=False)["Close"].dropna()
+                        
+                        if prices.empty or len(prices) < 60:
+                            st.error("Insufficient data. Try different symbols or longer lookback.")
+                        else:
+                            logp = np.log(prices)
+                            rets = prices.pct_change().dropna()
+                            
+                            # ========== COINTEGRATION TEST ==========
+                            st.markdown("---")
+                            st.markdown("### 📊 Cointegration Test (Engle-Granger)")
+                            
+                            if STATSMODELS_AVAILABLE:
+                                score, pvalue, crit = coint(logp[pair_a].dropna(), logp[pair_b].dropna())
+                                
+                                coint_c1, coint_c2, coint_c3 = st.columns(3)
+                                with coint_c1:
+                                    st.metric("Test Statistic", f"{score:.3f}")
+                                with coint_c2:
+                                    color = "normal" if pvalue < 0.05 else "off"
+                                    st.metric("P-Value", f"{pvalue:.4f}", delta="✓ Cointegrated" if pvalue < 0.05 else "✗ Not Cointegrated", delta_color=color)
+                                with coint_c3:
+                                    st.metric("5% Critical Value", f"{crit[1]:.3f}")
+                                
+                                if pvalue < 0.05:
+                                    st.success(f"✅ {pair_a} and {pair_b} are cointegrated (p={pvalue:.4f})")
+                                else:
+                                    st.warning(f"⚠️ {pair_a} and {pair_b} are NOT cointegrated (p={pvalue:.4f})")
+                            else:
+                                st.warning("statsmodels not installed. Install with: `pip install statsmodels`")
+                                pvalue = 1.0
+                            
+                            # ========== HEDGE RATIO & SPREAD ==========
+                            BETA_LOOKBACK = min(252, len(prices) - 1)
+                            Z_LOOKBACK = min(126, len(prices) - 1)
+                            CORR_LOOKBACK = 60
+                            
+                            cov_ab = logp[pair_a].rolling(BETA_LOOKBACK).cov(logp[pair_b])
+                            var_b = logp[pair_b].rolling(BETA_LOOKBACK).var()
+                            beta = (cov_ab / var_b).rename("beta")
+                            
+                            spread = (logp[pair_a] - beta * logp[pair_b]).rename("spread")
+                            
+                            # Z-score
+                            mu = spread.rolling(Z_LOOKBACK).mean()
+                            sig = spread.rolling(Z_LOOKBACK).std()
+                            z = ((spread - mu) / sig).rename("zscore")
+                            
+                            # ========== HALF-LIFE ==========
+                            st.markdown("---")
+                            st.markdown("### ⏱️ Half-Life of Mean Reversion")
+                            
+                            spread_lag = spread.shift(1)
+                            delta_spread = spread - spread_lag
+                            hl_df = pd.concat([delta_spread.rename("dS"), spread_lag.rename("S_lag")], axis=1).dropna()
+                            
+                            x = hl_df["S_lag"].values
+                            y = hl_df["dS"].values
+                            x_mean = x.mean()
+                            y_mean = y.mean()
+                            b_slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean) ** 2)
+                            
+                            if b_slope < 0:
+                                half_life = -np.log(2) / b_slope
+                            else:
+                                half_life = np.nan
+                            
+                            hl_c1, hl_c2 = st.columns(2)
+                            with hl_c1:
+                                st.metric("Regression Slope", f"{b_slope:.5f}")
+                            with hl_c2:
+                                if np.isfinite(half_life):
+                                    hl_status = "✓ Good" if half_life < 60 else "Slow"
+                                    st.metric("Half-Life (days)", f"{half_life:.1f}", delta=hl_status)
+                                else:
+                                    st.metric("Half-Life", "N/A", delta="No mean reversion")
+                            
+                            # ========== ROLLING CORRELATION ==========
+                            st.markdown("---")
+                            st.markdown("### 📈 Rolling Correlation")
+                            
+                            roll_corr = rets[pair_a].rolling(CORR_LOOKBACK).corr(rets[pair_b]).rename("roll_corr")
+                            
+                            corr_fig = go.Figure()
+                            corr_fig.add_trace(go.Scatter(x=roll_corr.index, y=roll_corr.values, mode='lines', name='Rolling Corr', line=dict(color='#3B82F6', width=2)))
+                            corr_fig.add_hline(y=0.8, line_dash="dash", line_color="green", annotation_text="0.80 threshold")
+                            corr_fig.add_hline(y=0.0, line_dash="dot", line_color="gray")
+                            corr_fig.update_layout(height=300, title=f"{CORR_LOOKBACK}-Day Rolling Correlation", template="plotly_white", yaxis_range=[-1, 1])
+                            st.plotly_chart(corr_fig, use_container_width=True)
+                            
+                            current_corr = roll_corr.iloc[-1] if len(roll_corr) > 0 else 0
+                            st.metric("Current Rolling Correlation", f"{current_corr:.3f}")
+                            
+                            # ========== Z-SCORE CHART ==========
+                            st.markdown("---")
+                            st.markdown("### 📉 Spread Z-Score")
+                            
+                            z_clean = z.dropna()
+                            z_fig = go.Figure()
+                            z_fig.add_trace(go.Scatter(x=z_clean.index, y=z_clean.values, mode='lines', name='Z-Score', line=dict(color='#1E293B', width=1.5)))
+                            z_fig.add_hline(y=entry_z, line_dash="dash", line_color="red", annotation_text=f"Entry +{entry_z}")
+                            z_fig.add_hline(y=-entry_z, line_dash="dash", line_color="green", annotation_text=f"Entry -{entry_z}")
+                            z_fig.add_hline(y=exit_z, line_dash="dot", line_color="orange")
+                            z_fig.add_hline(y=-exit_z, line_dash="dot", line_color="orange")
+                            z_fig.add_hline(y=0, line_color="gray", line_width=0.5)
+                            z_fig.update_layout(height=350, title="Spread Z-Score with Entry/Exit Bands", template="plotly_white")
+                            st.plotly_chart(z_fig, use_container_width=True)
+                            
+                            # ========== BACKTEST ==========
+                            st.markdown("---")
+                            st.markdown("### 💰 Simple Backtest")
+                            
+                            # Build data frame
+                            data = pd.concat([prices, rets.add_prefix("ret_"), beta, spread, z, roll_corr], axis=1).dropna()
+                            data["entry_allowed"] = (data["roll_corr"] >= 0.80)
+                            
+                            STOP_Z = 3.5
+                            pos = 0
+                            positions = []
+                            for zi, allowed in zip(data["zscore"].values, data["entry_allowed"].values):
+                                if pos == 0:
+                                    if allowed:
+                                        if zi > entry_z:
+                                            pos = -1
+                                        elif zi < -entry_z:
+                                            pos = 1
+                                else:
+                                    if abs(zi) < exit_z:
+                                        pos = 0
+                                    elif abs(zi) > STOP_Z:
+                                        pos = 0
+                                    elif not allowed:
+                                        pos = 0
+                                positions.append(pos)
+                            
+                            data["position"] = positions
+                            data["pos_lag"] = data["position"].shift(1).fillna(0)
+                            
+                            # Strategy returns
+                            beta_t = data["beta"].clip(lower=0.01)
+                            wA = 1.0 / (1.0 + beta_t)
+                            wB = 1.0 - wA
+                            
+                            pair_ret = np.where(
+                                data["pos_lag"] == 1,
+                                wA * data[f"ret_{pair_a}"] - wB * data[f"ret_{pair_b}"],
+                                np.where(
+                                    data["pos_lag"] == -1,
+                                    -wA * data[f"ret_{pair_a}"] + wB * data[f"ret_{pair_b}"],
+                                    0.0
+                                )
+                            )
+                            
+                            data["strategy"] = pair_ret
+                            data["equity"] = (1.0 + data["strategy"]).cumprod()
+                            
+                            # Equity chart
+                            eq_fig = go.Figure()
+                            eq_fig.add_trace(go.Scatter(x=data.index, y=data["equity"].values, mode='lines', name='Strategy Equity', line=dict(color='#10B981', width=2)))
+                            eq_fig.add_hline(y=1.0, line_dash="dot", line_color="gray")
+                            eq_fig.update_layout(height=350, title="Pairs Strategy Equity Curve", template="plotly_white")
+                            st.plotly_chart(eq_fig, use_container_width=True)
+                            
+                            # Stats
+                            total_ret = data["equity"].iloc[-1] - 1
+                            trades = int((data["position"].diff().abs() > 0).sum())
+                            time_in = (data["pos_lag"] != 0).mean() * 100
+                            ann_vol = data["strategy"].std() * np.sqrt(252) * 100
+                            sharpe = (data["strategy"].mean() * 252) / (data["strategy"].std() * np.sqrt(252)) if data["strategy"].std() > 0 else 0
+                            max_dd = ((data["equity"] / data["equity"].cummax()) - 1).min() * 100
+                            
+                            st_c1, st_c2, st_c3, st_c4 = st.columns(4)
+                            with st_c1:
+                                st.metric("Total Return", f"{total_ret*100:.1f}%")
+                            with st_c2:
+                                st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                            with st_c3:
+                                st.metric("Max Drawdown", f"{max_dd:.1f}%")
+                            with st_c4:
+                                st.metric("Trades", trades)
+                            
+                            st_c5, st_c6 = st.columns(2)
+                            with st_c5:
+                                st.metric("Annualized Vol", f"{ann_vol:.1f}%")
+                            with st_c6:
+                                st.metric("Time in Market", f"{time_in:.1f}%")
+                            
+                            # ========== CURRENT SIGNAL ==========
+                            st.markdown("---")
+                            st.markdown("### 🎯 Current Signal")
+                            
+                            last = data.iloc[-1]
+                            sig_c1, sig_c2, sig_c3, sig_c4 = st.columns(4)
+                            with sig_c1:
+                                st.metric(f"{pair_a} Price", f"${last[pair_a]:.2f}")
+                            with sig_c2:
+                                st.metric(f"{pair_b} Price", f"${last[pair_b]:.2f}")
+                            with sig_c3:
+                                st.metric("Current Z-Score", f"{last['zscore']:.2f}")
+                            with sig_c4:
+                                pos_label = {1: f"Long {pair_a} / Short {pair_b}", -1: f"Short {pair_a} / Long {pair_b}", 0: "Flat"}
+                                st.metric("Position", pos_label.get(int(last["position"]), "Flat"))
+                            
+                            # Summary
+                            st.markdown("---")
+                            meets_criteria = pvalue < 0.05 and (np.isfinite(half_life) and half_life < 60) and current_corr > 0.8
+                            if meets_criteria:
+                                st.success(f"✅ **{pair_a}/{pair_b} PASSES all filters**: Cointegrated (p={pvalue:.3f}), Half-life={half_life:.0f}d, Corr={current_corr:.2f}")
+                            else:
+                                issues = []
+                                if pvalue >= 0.05:
+                                    issues.append(f"Not cointegrated (p={pvalue:.3f})")
+                                if not np.isfinite(half_life) or half_life >= 60:
+                                    issues.append(f"Half-life too slow ({half_life:.0f}d)" if np.isfinite(half_life) else "No mean reversion")
+                                if current_corr <= 0.8:
+                                    issues.append(f"Low correlation ({current_corr:.2f})")
+                                st.warning(f"⚠️ **{pair_a}/{pair_b} FAILS**: {', '.join(issues)}")
+                            
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
 
 
 if __name__ == "__main__":
