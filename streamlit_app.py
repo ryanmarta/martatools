@@ -27,6 +27,13 @@ try:
 except ImportError:
     FINVIZ_AVAILABLE = False
 
+# Optional statsmodels for Pairs cointegration
+try:
+    from statsmodels.tsa.stattools import coint
+    STATSMODELS_AVAILABLE = True
+except ImportError:
+    STATSMODELS_AVAILABLE = False
+
 
 # ------------------------------------------------------------------------------
 # 1. CONFIGURATION & THEME
