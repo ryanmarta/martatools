@@ -1043,7 +1043,7 @@ def main():
     with st.sidebar:
         st.markdown("### 🛠️ Marta Tools")
         
-        mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter", "🧠 Ryan Model 2.0"], label_visibility="collapsed")
+        mode = st.radio("Select Module", ["📺 Dashboard", "💎 Options", "🎯 Sniper", "🦅 Hunter", "🧠 Ryan Model 2.0", "🔗 Pairs"], label_visibility="collapsed")
         
         st.markdown("---")
         st.caption("Tap ✕ or swipe to close")
@@ -6089,6 +6089,186 @@ Equity-substitute and deep-ITM structures are rejected by default.
             - **Leveraged:** TQQQ, SOXL, UVXY (high vol = cheap convexity)
             
             💡 *For single-name stock options, use the **🔍 Opt Hunt** module*
+            """)
+
+    # ==========================================
+    # MODULE F: PAIRS (Correlation Analysis)
+    # ==========================================
+    elif mode == "🔗 Pairs":
+        st.title("🔗 Pairs: Correlation Analysis")
+        st.caption("Rolling 3-Month Correlation Heatmap | Four Horsemen + Hunter Universe")
+        
+        st.markdown("""
+        ### 📋 Pairs Trading & Correlation
+        
+        This module calculates **rolling 3-month correlations** between:
+        - **Four Horsemen ETFs**: JNK, LQD, XLY, XLP, QQQ, TLT, SPY, GLD (regime indicators)
+        - **Hunter Stock Universe**: 60+ liquid stocks across sectors
+        
+        High correlation pairs move together. Low/negative correlation pairs diverge.
+        """)
+        
+        # Configuration
+        with st.expander("🛠️ Configuration", expanded=True):
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                lookback_months = st.slider("Lookback Period (Months)", 1, 12, 3, key="pairs_lookback")
+                min_corr = st.slider("Min Correlation Filter", -1.0, 0.5, -1.0, 0.1, key="pairs_min_corr")
+            with pc2:
+                universe_type = st.selectbox("Asset Universe", [
+                    "🏛️ Four Horsemen ETFs Only (8)",
+                    "🦅 Hunter Stocks Only (64)",
+                    "🌐 Combined Universe (72)"
+                ], key="pairs_universe")
+        
+        # Define asset universes
+        FOUR_HORSEMEN = ['JNK', 'LQD', 'XLY', 'XLP', 'QQQ', 'TLT', 'SPY', 'GLD']
+        
+        HUNTER_UNIVERSE = [
+            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE",
+            "CRM", "AMD", "QCOM", "TXN", "JPM", "BAC", "V", "MA", "WFC", "GS",
+            "MS", "AXP", "BLK", "C", "PYPL", "WMT", "COST", "PG", "HD", "KO",
+            "PEP", "MCD", "DIS", "NKE", "SBUX", "LLY", "UNH", "JNJ", "MRK", "ABBV",
+            "PFE", "AMGN", "GILD", "CAT", "DE", "HON", "GE", "BA", "LMT", "RTX",
+            "XOM", "CVX", "COP", "SLB", "PLTR", "DKNG", "ROKU", "SQ", "COIN"
+        ]
+        
+        def get_pairs_universe(choice):
+            if "Four Horsemen" in choice:
+                return FOUR_HORSEMEN
+            elif "Hunter" in choice:
+                return HUNTER_UNIVERSE[:30]  # Limit for performance
+            else:
+                return FOUR_HORSEMEN + HUNTER_UNIVERSE[:25]
+        
+        if st.button("📊 Generate Correlation Heatmap", type="primary", use_container_width=True, key="pairs_scan"):
+            selected_assets = get_pairs_universe(universe_type)
+            
+            # Calculate date range (rolling 3 months)
+            end_date = pd.Timestamp.now()
+            start_date = end_date - pd.DateOffset(months=lookback_months)
+            
+            with st.spinner(f"Fetching {len(selected_assets)} assets for {lookback_months}-month period..."):
+                try:
+                    # Download price data
+                    prices = yf.download(
+                        selected_assets,
+                        start=start_date.strftime('%Y-%m-%d'),
+                        end=end_date.strftime('%Y-%m-%d'),
+                        progress=False
+                    )["Close"]
+                    
+                    if prices.empty:
+                        st.error("No price data returned. Try again.")
+                    else:
+                        # Calculate returns and correlation
+                        returns = prices.pct_change().dropna()
+                        corr = returns.corr()
+                        
+                        # Display stats
+                        st.markdown("---")
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            st.metric("Assets Analyzed", len(corr.columns))
+                        with c2:
+                            st.metric("Trading Days", len(returns))
+                        with c3:
+                            avg_corr = corr.values[np.triu_indices_from(corr.values, 1)].mean()
+                            st.metric("Avg Correlation", f"{avg_corr:.2f}")
+                        
+                        # Create Plotly heatmap
+                        fig = go.Figure(data=go.Heatmap(
+                            z=corr.values,
+                            x=corr.columns,
+                            y=corr.columns,
+                            colorscale='RdYlGn',
+                            zmid=0,
+                            text=np.round(corr.values, 2),
+                            texttemplate="%{text}",
+                            textfont={"size": 8},
+                            hovertemplate="%{x} vs %{y}<br>Correlation: %{z:.3f}<extra></extra>"
+                        ))
+                        
+                        fig.update_layout(
+                            title=f"Rolling {lookback_months}-Month Correlation Matrix",
+                            height=max(500, len(corr.columns) * 20),
+                            xaxis_title="",
+                            yaxis_title="",
+                            xaxis={'side': 'bottom'},
+                            template="plotly_white"
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Find extreme pairs
+                        st.markdown("---")
+                        st.subheader("🔍 Notable Pairs")
+                        
+                        # Get upper triangle pairs
+                        pairs_list = []
+                        for i in range(len(corr.columns)):
+                            for j in range(i+1, len(corr.columns)):
+                                pairs_list.append({
+                                    'Pair': f"{corr.columns[i]} / {corr.columns[j]}",
+                                    'Asset1': corr.columns[i],
+                                    'Asset2': corr.columns[j],
+                                    'Correlation': corr.iloc[i, j]
+                                })
+                        
+                        pairs_df = pd.DataFrame(pairs_list)
+                        pairs_df = pairs_df[pairs_df['Correlation'] >= min_corr]
+                        
+                        tab1, tab2 = st.tabs(["📈 Highest Correlation", "📉 Lowest Correlation"])
+                        
+                        with tab1:
+                            high_corr = pairs_df.nlargest(15, 'Correlation')
+                            st.caption("*These pairs move together - good for confirmation, bad for diversification*")
+                            st.dataframe(
+                                high_corr[['Pair', 'Correlation']],
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    'Correlation': st.column_config.ProgressColumn(
+                                        'Correlation', format="%.2f", min_value=-1, max_value=1
+                                    )
+                                }
+                            )
+                        
+                        with tab2:
+                            low_corr = pairs_df.nsmallest(15, 'Correlation')
+                            st.caption("*These pairs diverge - potential spread trades or hedges*")
+                            st.dataframe(
+                                low_corr[['Pair', 'Correlation']],
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    'Correlation': st.column_config.ProgressColumn(
+                                        'Correlation', format="%.2f", min_value=-1, max_value=1
+                                    )
+                                }
+                            )
+                        
+                except Exception as e:
+                    st.error(f"Error fetching data: {str(e)}")
+        else:
+            st.info("🔗 **Click to analyze correlations** between assets over your selected time period.")
+            
+            st.markdown("""
+            ### How To Use
+            
+            1. **Select Universe**: Choose which assets to analyze
+            2. **Set Lookback**: Rolling period captures current regime
+            3. **Generate Heatmap**: Click to run analysis
+            
+            **Interpretation:**
+            - 🟢 **Green (+1.0)**: Highly correlated (move together)
+            - 🟡 **Yellow (0.0)**: Uncorrelated (independent)
+            - 🔴 **Red (-1.0)**: Negatively correlated (move opposite)
+            
+            **Use Cases:**
+            - Find hedging pairs (negative correlation)
+            - Identify regime shifts (changing correlations)
+            - Spot crowded trades (high correlation clusters)
             """)
 
 
