@@ -842,6 +842,83 @@ class ScannerEngine:
         "QQQ",
         "IWM",
         "DIA",
+        # Added Large/Mega Caps (25 more)
+        "NFLX",
+        "BKNG",
+        "ABNB",
+        "UBER",
+        "SHOP",
+        "NOW",
+        "PANW",
+        "SNOW",
+        "CRWD",
+        "ZS",
+        "INTC",
+        "MU",
+        "AMAT",
+        "LRCX",
+        "KLAC",
+        "TMO",
+        "DHR",
+        "ABT",
+        "ISRG",
+        "BMY",
+        "VRTX",
+        "REGN",
+        "LOW",
+        "TGT",
+        "CMG",
+        "LULU",
+        "YUM",
+        "EL",
+        "CL",
+        # Defense & Aerospace
+        "NOC",
+        "GD",
+        "LHX",
+        "HII",
+        # Housing / Homebuilders
+        "DHI",
+        "LEN",
+        "PHM",
+        "NVR",
+        "TOL",
+        "KBH",
+        # Energy / Materials / Utilities
+        "FCX",
+        "NEM",
+        "FSLR",
+        "ENPH",
+        "NEE",
+        # User Custom Adds
+        "TXT",
+        "TDY",
+        "ENVX",
+        "RCAT",
+        "UMAC",
+        "DPRO",
+        "AVAV",
+        "ONDS",
+        "ARM",
+        "NBIS",
+        "SOFI",
+        "OSCR",
+        "EOSE",
+        "CORZ",
+        "CRCL",
+        "CVNA",
+        "SMR",
+        "KTOS",
+        "FOUR",
+        "NVO",
+        "DLO",
+        "NXXT",
+        "RKLB",
+        "ASTS",
+        "HIMS",
+        "IREN",
+        "ANF",
+        "MSTR",
     ]
 
     @staticmethod
@@ -6117,29 +6194,23 @@ Equity-substitute and deep-ITM structures are rejected by default.
             with pc2:
                 universe_type = st.selectbox("Asset Universe", [
                     "🏛️ Four Horsemen ETFs Only (8)",
-                    "🦅 Hunter Stocks Only (64)",
-                    "🌐 Combined Universe (72)"
+                    "🦅 Hunter Stocks (from Scanner)",
+                    "🌐 Combined Universe"
                 ], key="pairs_universe")
         
-        # Define asset universes
+        # Use the same universes as the rest of the app
         FOUR_HORSEMEN = ['JNK', 'LQD', 'XLY', 'XLP', 'QQQ', 'TLT', 'SPY', 'GLD']
         
-        HUNTER_UNIVERSE = [
-            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE",
-            "CRM", "AMD", "QCOM", "TXN", "JPM", "BAC", "V", "MA", "WFC", "GS",
-            "MS", "AXP", "BLK", "C", "PYPL", "WMT", "COST", "PG", "HD", "KO",
-            "PEP", "MCD", "DIS", "NKE", "SBUX", "LLY", "UNH", "JNJ", "MRK", "ABBV",
-            "PFE", "AMGN", "GILD", "CAT", "DE", "HON", "GE", "BA", "LMT", "RTX",
-            "XOM", "CVX", "COP", "SLB", "PLTR", "DKNG", "ROKU", "SQ", "COIN"
-        ]
+        # Reference the ScannerEngine WATCHLIST so it stays in sync
+        HUNTER_UNIVERSE = ScannerEngine.WATCHLIST
         
         def get_pairs_universe(choice):
             if "Four Horsemen" in choice:
                 return FOUR_HORSEMEN
             elif "Hunter" in choice:
-                return HUNTER_UNIVERSE[:30]  # Limit for performance
+                return HUNTER_UNIVERSE[:50]  # Limit for performance
             else:
-                return FOUR_HORSEMEN + HUNTER_UNIVERSE[:25]
+                return FOUR_HORSEMEN + HUNTER_UNIVERSE[:40]
         
         if st.button("📊 Generate Correlation Heatmap", type="primary", use_container_width=True, key="pairs_scan"):
             selected_assets = get_pairs_universe(universe_type)
