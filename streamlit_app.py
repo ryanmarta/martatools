@@ -72,31 +72,35 @@ st.markdown(
             border-radius: 12px !important;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
         }
-        div[data-testid="stMetricValue"] { 
-            color: #FFFFFF !important; 
-            font-family: 'JetBrains Mono', monospace; 
-            font-weight: 700; 
-        }
+        
+        /* ALL METRIC TEXT - FORCE WHITE */
+        div[data-testid="stMetric"] *,
+        div[data-testid="stMetricValue"],
+        div[data-testid="stMetricValue"] *,
         div[data-testid="stMetricLabel"],
-        div[data-testid="stMetricLabel"] * { 
-            color: #FFFFFF !important; 
-            font-size: 0.85rem !important; 
-            letter-spacing: 0.5px; 
-            font-weight: 600; 
-            text-transform: uppercase !important; 
+        div[data-testid="stMetricLabel"] *,
+        div[data-testid="stMetricDelta"],
+        div[data-testid="stMetricDelta"] *,
+        div[data-testid="stMetric"] p,
+        div[data-testid="stMetric"] span,
+        div[data-testid="stMetric"] div,
+        div[data-testid="stMetric"] label {
+            color: #FFFFFF !important;
         }
         
-        /* Metric label inner elements - force white */
-        div[data-testid="stMetricLabel"] p,
-        div[data-testid="stMetricLabel"] span,
-        div[data-testid="stMetricLabel"] div,
-        div[data-testid="stMetric"] label,
-        div[data-testid="stMetric"] label p,
-        div[data-testid="stMetric"] label span {
-            color: #FFFFFF !important;
+        /* Metric Value styling */
+        div[data-testid="stMetricValue"] { 
+            font-family: 'JetBrains Mono', monospace !important; 
+            font-weight: 700 !important; 
+            font-size: 1.75rem !important;
         }
-        div[data-testid="stMetricDelta"] > div {
-            color: #FFFFFF !important;
+        
+        /* Metric Label styling */
+        div[data-testid="stMetricLabel"] { 
+            font-size: 0.85rem !important; 
+            letter-spacing: 0.5px !important; 
+            font-weight: 600 !important; 
+            text-transform: uppercase !important; 
         }
         
         /* ALERTS */
@@ -2003,10 +2007,10 @@ def main():
                 with cols[i]:
                     if "VIX" in name:
                         # VIX: up is bad (red), down is good (green) - inverse logic
-                        dynamic_metric(name, f"{data['price']:.2f}", data['change'], inverse=True)
+                        st.metric(name, f"{data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="inverse")
                     else:
                         # Normal indices: up is good (green), down is bad (red)
-                        dynamic_metric(name, f"${data['price']:.2f}", data['change'], inverse=False)
+                        st.metric(name, f"${data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="normal")
         else:
             st.warning("Unable to load indices data")
         
