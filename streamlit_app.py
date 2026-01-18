@@ -134,10 +134,38 @@ st.markdown(
             color: #FFFFFF !important;
         }
         
-        /* ALL BUTTONS - ENSURE READABLE */
-        .stButton > button {
+        /* ALL BUTTONS - WHITE TEXT (comprehensive selectors) */
+        .stButton > button,
+        .stButton button,
+        button[data-testid="baseButton-secondary"],
+        button[data-testid="baseButton-tertiary"],
+        button[data-testid="stBaseButton-secondary"],
+        button[kind="secondary"],
+        div.stButton > button,
+        div[data-testid="stButton"] > button,
+        .stDownloadButton > button,
+        .stFormSubmitButton > button {
             color: #FFFFFF !important;
             background-color: #1E293B !important;
+            border: 1px solid #334155 !important;
+        }
+        
+        /* Button hover states */
+        .stButton > button:hover,
+        .stButton button:hover,
+        button[data-testid="baseButton-secondary"]:hover,
+        div.stButton > button:hover {
+            color: #FFFFFF !important;
+            background-color: #475569 !important;
+        }
+        
+        /* Button text spans inside buttons */
+        .stButton > button span,
+        .stButton > button p,
+        .stButton > button div,
+        button span,
+        button p {
+            color: #FFFFFF !important;
         }
         
         /* GLOBAL READABILITY IMPROVEMENTS */
@@ -165,6 +193,23 @@ st.markdown(
         section[data-testid="stSidebar"] .stRadio > label:hover {
             background: #475569 !important;
             border-color: #3B82F6 !important;
+        }
+        
+        /* SIDEBAR - SELECTED/ACTIVE MODULE INDICATOR */
+        section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label[data-checked="true"],
+        section[data-testid="stSidebar"] .stRadio > div > label:has(input:checked),
+        section[data-testid="stSidebar"] .stRadio div[data-checked="true"] {
+            background: #3B82F6 !important;
+            border-color: #60A5FA !important;
+            border-left: 4px solid #60A5FA !important;
+            color: #FFFFFF !important;
+            font-weight: 700 !important;
+        }
+        
+        /* Alternative selector for checked radio */
+        section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked + div,
+        section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked ~ div {
+            background: #3B82F6 !important;
         }
         
         /* Hide default radio circles in sidebar */
@@ -929,6 +974,123 @@ class ScannerEngine:
     ]
 
     @staticmethod
+    def calculate_flow_signal(ticker, trend, momentum):
+        """
+        Calculate options flow signal using VOL/OI and Put/Call ratios.
+        Returns: (signal_label, flow_score, details)
+        
+        Signal Labels:
+        - 🟢 BULLISH: Strong call flow, VOL/OI confirms fresh buying
+        - 🟡 NEUTRAL: Mixed signals or insufficient data
+        - 🔴 BEARISH: Strong put flow, VOL/OI confirms fresh selling
+        - ⚠️ FAKE: Flow contradicts price action (likely hedging/closing)
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            
+            # Get options expirations
+            expirations = stock.options
+            if not expirations or len(expirations) == 0:
+                return "🟡 NEUTRAL", 0, "No opts"
+            
+            # Focus on near-term expirations (first 2)
+            total_call_vol = 0
+            total_put_vol = 0
+            total_call_oi = 0
+            total_put_oi = 0
+            
+            for exp in expirations[:2]:
+                try:
+                    chain = stock.option_chain(exp)
+                    calls = chain.calls
+                    puts = chain.puts
+                    
+                    # Sum volumes and OI
+                    if 'volume' in calls.columns:
+                        total_call_vol += calls['volume'].fillna(0).sum()
+                    if 'volume' in puts.columns:
+                        total_put_vol += puts['volume'].fillna(0).sum()
+                    if 'openInterest' in calls.columns:
+                        total_call_oi += calls['openInterest'].fillna(0).sum()
+                    if 'openInterest' in puts.columns:
+                        total_put_oi += puts['openInterest'].fillna(0).sum()
+                except:
+                    continue
+            
+            # Avoid division by zero
+            if total_call_vol == 0 and total_put_vol == 0:
+                return "🟡 NEUTRAL", 0, "No vol"
+            
+            # Calculate key ratios
+            pc_ratio = total_put_vol / max(total_call_vol, 1)
+            call_vol_oi = total_call_vol / max(total_call_oi, 1)
+            put_vol_oi = total_put_vol / max(total_put_oi, 1)
+            
+            # --- SCORING ENGINE ---
+            flow_score = 0
+            
+            # 1. Put/Call Ratio Sentiment (±40 points)
+            if pc_ratio < 0.5:  # Very call heavy
+                flow_score += 40
+            elif pc_ratio < 0.7:
+                flow_score += 25
+            elif pc_ratio < 0.9:
+                flow_score += 10
+            elif pc_ratio > 2.0:  # Very put heavy
+                flow_score -= 40
+            elif pc_ratio > 1.5:
+                flow_score -= 25
+            elif pc_ratio > 1.2:
+                flow_score -= 10
+            
+            # 2. VOL/OI Ratio - Fresh Money Indicator (±30 points)
+            # High VOL/OI = new positions opening
+            if call_vol_oi > 10:  # Very high call activity
+                flow_score += 30
+            elif call_vol_oi > 5:
+                flow_score += 15
+            elif call_vol_oi > 2:
+                flow_score += 5
+            
+            if put_vol_oi > 10:  # Very high put activity
+                flow_score -= 30
+            elif put_vol_oi > 5:
+                flow_score -= 15
+            elif put_vol_oi > 2:
+                flow_score -= 5
+            
+            # 3. Determine base signal
+            if flow_score >= 35:
+                base_signal = "BULLISH"
+            elif flow_score <= -35:
+                base_signal = "BEARISH"
+            else:
+                base_signal = "NEUTRAL"
+            
+            # 4. FAKE Detection - Flow contradicts price action
+            # If bullish flow but bearish trend/momentum = likely hedging
+            # If bearish flow but bullish trend/momentum = likely hedging
+            is_trend_bullish = (trend == "BULLISH" and momentum == "BULLISH")
+            is_trend_bearish = (trend == "BEARISH" and momentum == "BEARISH")
+            
+            if base_signal == "BULLISH" and is_trend_bearish:
+                return "⚠️ FAKE", flow_score, f"P/C:{pc_ratio:.1f} vs 📉"
+            elif base_signal == "BEARISH" and is_trend_bullish:
+                return "⚠️ FAKE", flow_score, f"P/C:{pc_ratio:.1f} vs 📈"
+            
+            # 5. Return final signal
+            details = f"P/C:{pc_ratio:.1f}"
+            if base_signal == "BULLISH":
+                return "🟢 BULLISH", flow_score, details
+            elif base_signal == "BEARISH":
+                return "🔴 BEARISH", flow_score, details
+            else:
+                return "🟡 NEUTRAL", flow_score, details
+                
+        except Exception:
+            return "🟡 NEUTRAL", 0, "Error"
+
+    @staticmethod
     def run_batch_scan(window, thresh):
         """
         Executes the specific Ryan Model logic:
@@ -1092,15 +1254,23 @@ class ScannerEngine:
                     vol_mult = 1.0
                     tail_risk = "UNKNOWN"
 
+                # --- OPTIONS FLOW SIGNAL ---
+                try:
+                    flow_signal, flow_score, flow_details = ScannerEngine.calculate_flow_signal(symbol, trend, mom)
+                except Exception:
+                    flow_signal = "🟡 NEUTRAL"
+                    flow_details = "Error"
+
                 results.append(
                     {
                         "Ticker": symbol,
                         "Action": action,
+                        "Flow": flow_signal,  # NEW: Options flow signal
                         "Confidence": confidence,
-                        "Quant_Score": quant_score,  # NEW
-                        "Regime": regime,  # NEW
-                        "Vol_Sizing": f"{vol_mult:.1f}x",  # NEW
-                        "Tail_Risk": tail_risk,  # NEW
+                        "Quant_Score": quant_score,
+                        "Regime": regime,
+                        "Vol_Sizing": f"{vol_mult:.1f}x",
+                        "Tail_Risk": tail_risk,
                         "Price": curr_p,
                         "Trend": trend,
                         "Momentum": mom,
@@ -1108,6 +1278,7 @@ class ScannerEngine:
                         "Health": health,
                         "Bandwidth": current_bw,
                         "Vol_Vel": vol_status,
+                        "Flow_Details": flow_details,  # NEW: P/C ratio details
                     }
                 )
 
