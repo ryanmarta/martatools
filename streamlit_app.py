@@ -77,19 +77,23 @@ st.markdown(
             font-family: 'JetBrains Mono', monospace; 
             font-weight: 700; 
         }
-        div[data-testid="stMetricLabel"] { 
-            color: #E2E8F0 !important; 
+        div[data-testid="stMetricLabel"],
+        div[data-testid="stMetricLabel"] * { 
+            color: #FFFFFF !important; 
             font-size: 0.85rem !important; 
             letter-spacing: 0.5px; 
             font-weight: 600; 
             text-transform: uppercase !important; 
         }
         
-        /* Metric label inner elements */
+        /* Metric label inner elements - force white */
         div[data-testid="stMetricLabel"] p,
         div[data-testid="stMetricLabel"] span,
-        div[data-testid="stMetricLabel"] div {
-            color: #E2E8F0 !important;
+        div[data-testid="stMetricLabel"] div,
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] label p,
+        div[data-testid="stMetric"] label span {
+            color: #FFFFFF !important;
         }
         div[data-testid="stMetricDelta"] > div {
             color: #FFFFFF !important;
