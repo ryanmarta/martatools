@@ -370,6 +370,63 @@ class GreekVector:
     ultima: float
 
 
+def dynamic_metric(label: str, value: str, change: float, inverse: bool = False):
+    """
+    Render a metric with dynamic color intensity based on change percentage.
+    
+    Args:
+        label: The metric label (e.g., "S&P 500")
+        value: The formatted value string (e.g., "$691.66")  
+        change: The percentage change as a float
+        inverse: If True, positive is bad (red) and negative is good (green) - for VIX
+    """
+    # Determine direction (accounting for inverse like VIX)
+    is_positive = change > 0
+    if inverse:
+        is_positive = not is_positive
+    
+    # Calculate intensity: cap at ±5% for full saturation
+    intensity = min(abs(change) / 5.0, 1.0)  # 0 to 1
+    
+    if is_positive:
+        # Green shades: from light (#86EFAC) to dark (#16A34A)
+        r = int(134 - (134 - 22) * intensity)
+        g = int(239 - (239 - 163) * intensity)
+        b = int(172 - (172 - 74) * intensity)
+    else:
+        # Red shades: from light (#FCA5A5) to dark (#DC2626)
+        r = int(252 - (252 - 220) * intensity)
+        g = int(165 - (165 - 38) * intensity)
+        b = int(165 - (165 - 38) * intensity)
+    
+    color = f"rgb({r}, {g}, {b})"
+    
+    # Delta arrow
+    arrow = "↑" if change > 0 else "↓" if change < 0 else "→"
+    delta_color = color
+    
+    # Render custom HTML metric
+    st.markdown(f"""
+    <div style="
+        background: #1E293B;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    ">
+        <div style="color: #FFFFFF; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+            {label}
+        </div>
+        <div style="color: {color}; font-size: 1.8rem; font-weight: 700; font-family: 'JetBrains Mono', monospace;">
+            {value}
+        </div>
+        <div style="color: {delta_color}; font-size: 0.875rem; font-weight: 600; margin-top: 4px;">
+            {arrow} {change:+.2f}%
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # ------------------------------------------------------------------------------
 # 3. HYDRA DATA ENGINE (FAIL-SAFE)
 # ------------------------------------------------------------------------------
@@ -1946,10 +2003,10 @@ def main():
                 with cols[i]:
                     if "VIX" in name:
                         # VIX: up is bad (red), down is good (green) - inverse logic
-                        st.metric(name, f"{data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="inverse")
+                        dynamic_metric(name, f"{data['price']:.2f}", data['change'], inverse=True)
                     else:
                         # Normal indices: up is good (green), down is bad (red)
-                        st.metric(name, f"${data['price']:.2f}", f"{data['change']:+.2f}%", delta_color="normal")
+                        dynamic_metric(name, f"${data['price']:.2f}", data['change'], inverse=False)
         else:
             st.warning("Unable to load indices data")
         
